@@ -1,0 +1,22 @@
+services:
+  timeline-xr:
+    build: .
+    image: timeline-xr:latest
+    container_name: timeline-xr
+    restart: unless-stopped
+    expose:
+      - "7860"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.timeline-xr.rule=Host(`timeline-xr.markuspassecker.com`)"
+      - "traefik.http.routers.timeline-xr.entrypoints=websecure"
+      - "traefik.http.routers.timeline-xr.tls=true"
+      - "traefik.http.routers.timeline-xr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.timeline-xr.loadbalancer.server.port=7860"
+
+networks:
+  proxy:
+    external: true

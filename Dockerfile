@@ -19,6 +19,14 @@ COPY . .
 # Resolve LFS pointers if real blobs weren't included in the build context.
 RUN git lfs pull || true
 
+# Pre-download CLIP so the first request is instant and runtime needs no HF access.
+RUN python -c "from transformers import CLIPModel, CLIPProcessor; \
+    m='openai/clip-vit-base-patch32'; CLIPProcessor.from_pretrained(m); CLIPModel.from_pretrained(m)"
+
+# slim image has no curl, so probe the lightest route ('/') with Python's urllib.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/')" || exit 1
+
 EXPOSE 7860
 ENV PORT=7860
 CMD ["python", "server.py"]
