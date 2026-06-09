@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { ARButton } from "three/addons/webxr/ARButton.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 
 const statusEl = document.getElementById("status");
 const setStatus = (msg, isErr = false) => {
@@ -118,7 +119,9 @@ function _mountXrButton(useAR) {
         optionalFeatures: ["dom-overlay", "local-floor", "hand-tracking"],
         domOverlay: { root: document.getElementById("overlay") },
       })
-    : VRButton.createButton(renderer);
+    : VRButton.createButton(renderer, {
+        optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking"],
+      });
   btn.style.position = "static";
   btn.style.transform = "none";
   document.getElementById("xr-slot").appendChild(btn);
@@ -340,14 +343,27 @@ async function loadTimeline() {
   shell.renderOrder = 2;
   world.add(shell);
 
-  // ~12 year labels evenly along the timeline.
+  // ~12 year labels evenly along the timeline, offset to the SIDE of the ribbon
+  // (perpendicular to the local timeline tangent, in the horizontal plane) so the
+  // thrown image cards — which park centred on the curve and face the viewer —
+  // don't overlap them. Offset (0.26 m) exceeds the card half-width (CARD_MAX/2).
   const N = d.points.length;
   const steps = 12;
+  const _tan = new THREE.Vector3();
+  const _side = new THREE.Vector3();
+  const _up = new THREE.Vector3(0, 1, 0);
+  const SIDE_OFFSET = 0.26;
   for (let s = 0; s < steps; s++) {
     const i = Math.round((s / (steps - 1)) * (N - 1));
     const lbl = makeLabel(String(d.labels[i]), "#cdd5ff", 0.12);
-    lbl.position.set(...d.points[i]);
-    lbl.position.y += 0.05;
+    const p = d.points[i];
+    const a = d.points[Math.max(0, i - 1)];
+    const b = d.points[Math.min(N - 1, i + 1)];
+    _tan.set(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    _side.crossVectors(_tan, _up); // horizontal, perpendicular to the timeline
+    if (_side.lengthSq() < 1e-6) _side.set(1, 0, 0); // tangent ≈ vertical → fallback
+    _side.normalize().multiplyScalar(SIDE_OFFSET);
+    lbl.position.set(p[0] + _side.x, p[1] + _side.y + 0.05, p[2] + _side.z);
     world.add(lbl);
   }
   setStatus(`Loaded ${N} years · ${d.yearRange[0]}–${d.yearRange[1]}.`);
@@ -693,6 +709,13 @@ function updateCards(now) {
     } else if (u.state === "tray") {
       viewerPose(_scratchA, _scratchQ);
       card.lookAt(_scratchA);
+    } else if (u.state === "parked") {
+      // Billboard the parked card at the viewer every frame (like the year-label
+      // sprites) so it tracks you as you orbit/move, instead of facing only the
+      // pose it had when it landed. lookAt works in world space and accounts for
+      // userGroup/world's transform, so the timeline anchor is unaffected.
+      viewerPose(_scratchA, _scratchQ);
+      card.lookAt(_scratchA);
     } else if (u.state === "flying" && u.flight) {
       const f = u.flight;
       const dt = Math.min(0.05, Math.max(0, (now - f.last) / 1000));
@@ -871,6 +894,7 @@ let grabbedBy = null;
 for (const i of [0, 1]) {
   const c = renderer.xr.getController(i);
   c.addEventListener("selectstart", () => {
+    if (twoHandScaling) return; // mid two-handed zoom — don't grab
     const card = pickCardForController(c); // card grab takes priority
     if (card && card.userData.state === "tray") {
       card.userData.state = "grabbed";
@@ -904,6 +928,81 @@ for (const i of [0, 1]) {
     ),
   );
   scene.add(c);
+}
+
+// ── Hand tracking: two-handed pinch to zoom the model ───────────────────────────
+// Each hand's pinch is detected from the thumb-tip↔index-tip joint distance (with
+// hysteresis to avoid flicker). When BOTH hands pinch, the live distance between
+// the two pinch points drives world.scale relative to where the gesture started —
+// spread hands apart to zoom in, bring them together to zoom out. This is the
+// hand-tracking analogue of the right thumbstick scale (applyThumbstickScale).
+const _handFactory = new XRHandModelFactory();
+const hands = [];
+for (const i of [0, 1]) {
+  const h = renderer.xr.getHand(i);
+  h.add(_handFactory.createHandModel(h, "spheres")); // built-in, no external asset
+  scene.add(h);
+  hands.push(h);
+}
+
+const PINCH_ON = 0.022; // m, thumb↔index gap to start a pinch
+const PINCH_OFF = 0.04; // m, gap to release it (hysteresis)
+const _pinchOn = [false, false];
+const _ji = new THREE.Vector3();
+const _jt = new THREE.Vector3();
+
+// True while hand `i` is pinching; writes the pinch midpoint to `outMid`.
+function pinchInfo(hand, i, outMid) {
+  const tip = hand.joints?.["index-finger-tip"];
+  const thumb = hand.joints?.["thumb-tip"];
+  if (!tip || !thumb || !tip.visible || !thumb.visible) {
+    _pinchOn[i] = false;
+    return false;
+  }
+  tip.getWorldPosition(_ji);
+  thumb.getWorldPosition(_jt);
+  const d = _ji.distanceTo(_jt);
+  if (_pinchOn[i]) {
+    if (d > PINCH_OFF) _pinchOn[i] = false;
+  } else if (d < PINCH_ON) {
+    _pinchOn[i] = true;
+  }
+  if (_pinchOn[i]) outMid.copy(_ji).add(_jt).multiplyScalar(0.5);
+  return _pinchOn[i];
+}
+
+const _ptL = new THREE.Vector3();
+const _ptR = new THREE.Vector3();
+const _scaleGesture = { active: false, startDist: 0, startScale: 1 };
+// Set while a two-handed scale is in progress so the pinch's select events don't
+// also grab/move the model (see the selectstart handler).
+let twoHandScaling = false;
+
+function applyHandPinchScale() {
+  if (!renderer.xr.getSession()) return;
+  const p0 = pinchInfo(hands[0], 0, _ptL);
+  const p1 = pinchInfo(hands[1], 1, _ptR);
+  if (p0 && p1) {
+    const dist = _ptL.distanceTo(_ptR);
+    if (!_scaleGesture.active) {
+      _scaleGesture.active = true;
+      _scaleGesture.startDist = dist;
+      _scaleGesture.startScale = world.scale.x;
+      twoHandScaling = true;
+      if (grabbedBy) {
+        // a pinch may have already grabbed the model — hand it back to the scene
+        // so scaling doesn't fight a controller-attached translate.
+        grabbedBy = null;
+        scene.attach(world);
+      }
+    } else if (_scaleGesture.startDist > 1e-4) {
+      const s = _scaleGesture.startScale * (dist / _scaleGesture.startDist);
+      world.scale.setScalar(THREE.MathUtils.clamp(s, 0.2, 6));
+    }
+  } else if (_scaleGesture.active) {
+    _scaleGesture.active = false;
+    twoHandScaling = false;
+  }
 }
 
 // ── Point-at-to-inspect + grip-to-pin ───────────────────────────────────────────
@@ -1100,6 +1199,7 @@ renderer.setAnimationLoop(() => {
   const now = performance.now();
   if (renderer.xr.isPresenting) {
     applyThumbstickScale();
+    applyHandPinchScale();
     pollCaptureButton();
     updateHover(0);
     updateHover(1);
