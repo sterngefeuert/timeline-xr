@@ -889,6 +889,30 @@ document.getElementById("legend-btn").addEventListener("click", () => {
   el.hidden = !el.hidden;
 });
 
+// "📱 Phone cam": reveal the /phone URL + a QR to scan. QR lib is imported lazily
+// (only when first opened) so it never affects initial load; if it fails the URL
+// text alone is enough to type in.
+document.getElementById("phone-btn").addEventListener("click", async () => {
+  const panel = document.getElementById("phone-panel");
+  panel.hidden = !panel.hidden;
+  if (panel.hidden) return;
+  const url = location.origin + "/phone";
+  document.getElementById("phone-url").textContent = url;
+  if (panel.dataset.qr) return; // already rendered
+  try {
+    const { default: QRCode } = await import(
+      "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/+esm"
+    );
+    await QRCode.toCanvas(document.getElementById("phone-qr"), url, {
+      width: 180,
+      margin: 1,
+    });
+    panel.dataset.qr = "1";
+  } catch {
+    document.getElementById("phone-qr").hidden = true; // fall back to URL text
+  }
+});
+
 // ── VR controllers: grab to move/rotate, right thumbstick to scale ──────────────
 let grabbedBy = null;
 for (const i of [0, 1]) {
@@ -1221,6 +1245,36 @@ loadTimeline().catch((e) =>
     true,
   ),
 );
+
+// ── Phone-shared photos: appear and auto-throw the instant they're sent ─────────
+// A phone at /phone POSTs a snapshot to /api/share; the server pushes it down this
+// SSE stream. We spawn the same kind of card as an upload, then immediately throw
+// it so it flies into the timeline and predicts with no manual toss.
+function receiveSharedImage(url, name) {
+  const card = spawnExampleCard(url, name || "photo");
+  throwCard(card);
+  showNotice(`📷 ${name || "photo"} received — estimating…`, false, 2500);
+}
+
+function connectShareStream() {
+  let es;
+  try {
+    es = new EventSource("/api/share/stream");
+  } catch {
+    return; // no EventSource support → phone sharing simply unavailable
+  }
+  es.onmessage = (e) => {
+    let d;
+    try {
+      d = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (d && d.url) receiveSharedImage(d.url, d.name);
+  };
+  // EventSource auto-reconnects on transient drops; nothing to handle here.
+}
+connectShareStream();
 
 // Bundled demo images → a grabbable shelf, so there is something to throw
 // without picking a file (re-seated in front of you on entering the headset).

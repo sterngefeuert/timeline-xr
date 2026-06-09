@@ -14,15 +14,18 @@ Run:
     python server.py        # http://localhost:7860
 """
 
+import asyncio
 import io
+import json
 import os
 import threading
+import uuid
 
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sklearn.decomposition import KernelPCA
@@ -218,6 +221,89 @@ def api_examples():
     except FileNotFoundError:
         names = []
     return {"examples": names}
+
+
+# ── Phone → headset photo sharing ───────────────────────────────────────────────
+# A phone opens GET /phone, snaps a picture in-browser, and POSTs it to
+# /api/share. The headset page holds an SSE connection to /api/share/stream and
+# spawns + auto-throws the photo the instant it arrives. Single global room (any
+# phone → every connected headset); images are held in memory and served back by
+# id. Kept deliberately tiny — no DB, no auth — for the homelab demo.
+_subscribers: "set[asyncio.Queue]" = set()
+_shared_images: "dict[str, dict]" = {}
+_SHARED_MAX = 24  # cap retained images so memory can't grow unbounded
+
+
+@app.get("/phone")
+def phone():
+    return FileResponse(os.path.join(WEBXR_DIR, "phone.html"))
+
+
+@app.post("/api/share")
+async def api_share(file: UploadFile = File(...)):
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty upload.")
+    img_id = uuid.uuid4().hex
+    _shared_images[img_id] = {
+        "bytes": data,
+        "type": file.content_type or "image/jpeg",
+        "name": file.filename or "photo.jpg",
+    }
+    # Evict oldest beyond the cap (dicts keep insertion order).
+    while len(_shared_images) > _SHARED_MAX:
+        _shared_images.pop(next(iter(_shared_images)))
+    event = {
+        "id": img_id,
+        "name": _shared_images[img_id]["name"],
+        "url": f"/api/share/img/{img_id}",
+    }
+    for q in list(_subscribers):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # a wedged subscriber shouldn't block the sender
+    return {"ok": True, "id": img_id}
+
+
+@app.get("/api/share/img/{img_id}")
+def api_share_img(img_id: str):
+    rec = _shared_images.get(img_id)
+    if not rec:
+        raise HTTPException(404, "No such shared image.")
+    return Response(content=rec["bytes"], media_type=rec["type"])
+
+
+@app.get("/api/share/stream")
+async def api_share_stream(request: Request):
+    """Server-Sent Events: one message per shared photo, plus periodic
+    keepalive comments so proxies/the browser hold the connection open."""
+    q: "asyncio.Queue" = asyncio.Queue(maxsize=32)
+    _subscribers.add(q)
+
+    async def gen():
+        try:
+            yield ": connected\n\n"  # comment line — opens the stream immediately
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _subscribers.discard(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable proxy buffering (nginx, etc.)
+        },
+    )
 
 
 if os.path.isdir(EXAMPLES_DIR):
