@@ -26,7 +26,12 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sklearn.decomposition import KernelPCA
@@ -222,7 +227,19 @@ def api_predict(file: UploadFile = File(...), backbone: str = "clip"):
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(WEBXR_DIR, "index.html"))
+    # No build step → no content-hashed asset names, and the reverse proxy slaps a
+    # long max-age on *.js that overrides our no-cache header. So stamp app.js with
+    # its mtime: the URL changes whenever the file does, forcing a fresh fetch on
+    # the next deploy regardless of the cached copy. `/` itself is served no-cache
+    # (see _no_store_frontend), so the headset always gets the current stamp.
+    with open(os.path.join(WEBXR_DIR, "index.html")) as f:
+        html = f.read()
+    try:
+        ver = int(os.path.getmtime(os.path.join(WEBXR_DIR, "app.js")))
+    except OSError:
+        ver = 0
+    html = html.replace('src="./app.js"', f'src="./app.js?v={ver}"')
+    return HTMLResponse(html)
 
 
 @app.get("/api/examples")
