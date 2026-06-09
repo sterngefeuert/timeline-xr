@@ -1256,6 +1256,7 @@ function receiveSharedImage(url, name) {
   showNotice(`📷 ${name || "photo"} received — estimating…`, false, 2500);
 }
 
+const _seenShareIds = new Set();
 function connectShareStream() {
   let es;
   try {
@@ -1270,7 +1271,12 @@ function connectShareStream() {
     } catch {
       return;
     }
-    if (d && d.url) receiveSharedImage(d.url, d.name);
+    // Dedup by id: the server replays the last event on (re)connect, and
+    // EventSource reconnects on transient drops — so the same photo can arrive
+    // more than once. Only throw it the first time we see it.
+    if (!d || !d.url || _seenShareIds.has(d.id)) return;
+    _seenShareIds.add(d.id);
+    receiveSharedImage(d.url, d.name);
   };
   // EventSource auto-reconnects on transient drops; nothing to handle here.
 }

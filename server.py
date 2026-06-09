@@ -19,6 +19,7 @@ import io
 import json
 import os
 import threading
+import time
 import uuid
 
 import numpy as np
@@ -160,6 +161,19 @@ def get_scene(backbone="clip", n_ctrl=300):
 app = FastAPI(title="Timeline-VLM WebXR")
 
 
+# The frontend has no build step / content hashing, so a long-lived cache makes
+# headsets keep running stale JS across deploys (this bit the phone-share rollout:
+# the Quest served a cached app.js without the SSE client). Force revalidation on
+# the HTML/JS entrypoints — they're tiny, and ETags still yield 304s when unchanged.
+@app.middleware("http")
+async def _no_store_frontend(request: Request, call_next):
+    resp = await call_next(request)
+    path = request.url.path
+    if path in ("/", "/phone") or path.endswith((".html", ".js")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.get("/api/timeline")
 def api_timeline(backbone: str = "clip", n_ctrl: int = 300):
     return get_scene(backbone, n_ctrl)["json"]
@@ -232,6 +246,12 @@ def api_examples():
 _subscribers: "set[asyncio.Queue]" = set()
 _shared_images: "dict[str, dict]" = {}
 _SHARED_MAX = 24  # cap retained images so memory can't grow unbounded
+# A headset that connects (or reconnects) just after a phone send would otherwise
+# miss it — SSE only reaches subscribers live at send time. So remember the last
+# event and replay it to a freshly-connected stream within this window; the client
+# dedups by id, so a keepalive reconnect never re-throws the same photo.
+_last_event = None  # (event_dict, monotonic_ts)
+_REPLAY_WINDOW = 90  # s
 
 
 @app.get("/phone")
@@ -258,6 +278,8 @@ async def api_share(file: UploadFile = File(...)):
         "name": _shared_images[img_id]["name"],
         "url": f"/api/share/img/{img_id}",
     }
+    global _last_event
+    _last_event = (event, time.monotonic())
     for q in list(_subscribers):
         try:
             q.put_nowait(event)
@@ -284,6 +306,9 @@ async def api_share_stream(request: Request):
     async def gen():
         try:
             yield ": connected\n\n"  # comment line — opens the stream immediately
+            le = _last_event
+            if le and (time.monotonic() - le[1]) < _REPLAY_WINDOW:
+                yield f"data: {json.dumps(le[0])}\n\n"  # catch a just-missed send
             while True:
                 if await request.is_disconnected():
                     break
