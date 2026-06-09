@@ -2,7 +2,6 @@ import * as THREE from "three";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { ARButton } from "three/addons/webxr/ARButton.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 
 const statusEl = document.getElementById("status");
 const setStatus = (msg, isErr = false) => {
@@ -148,13 +147,21 @@ document.body.appendChild(renderer.domElement);
 // Quest Browser lacks — you pick an image already on the headset.)
 const CAM_CAP = { arSupported: false };
 function _mountXrButton(useAR) {
+  // Request `unbounded` so you can walk around freely instead of being confined to
+  // the drawn play-area; `bounded-floor` is deliberately NOT requested. If the
+  // runtime grants unbounded we switch the reference space to it on sessionstart.
   const btn = useAR
     ? ARButton.createButton(renderer, {
-        optionalFeatures: ["dom-overlay", "local-floor", "hand-tracking"],
+        optionalFeatures: [
+          "dom-overlay",
+          "local-floor",
+          "unbounded",
+          "hand-tracking",
+        ],
         domOverlay: { root: document.getElementById("overlay") },
       })
     : VRButton.createButton(renderer, {
-        optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking"],
+        optionalFeatures: ["local-floor", "unbounded", "hand-tracking"],
       });
   btn.style.position = "static";
   btn.style.transform = "none";
@@ -181,8 +188,17 @@ scene.add(grid);
 // backdrop/fog/grid so the real room shows through; restore for VR/desktop.
 const _look = { bg: scene.background, fog: scene.fog };
 let _trayReplaceAt = 0; // re-seat the shelf at the viewer
-renderer.xr.addEventListener("sessionstart", () => {
+renderer.xr.addEventListener("sessionstart", async () => {
   const s = renderer.xr.getSession();
+  // Roam freely: if the runtime granted `unbounded`, use it as the reference
+  // space so you aren't clamped to the guardian play-area. Falls back silently to
+  // the default (local-floor) where unbounded isn't supported.
+  try {
+    const ref = await s.requestReferenceSpace("unbounded");
+    renderer.xr.setReferenceSpace(ref);
+  } catch {
+    /* unbounded unsupported — keep local-floor */
+  }
   if (s && s.environmentBlendMode && s.environmentBlendMode !== "opaque") {
     scene.background = null;
     scene.fog = null;
@@ -545,6 +561,12 @@ function _buildFrame(group, w, h) {
     }),
   );
   glow.position.z = -0.0008; // just behind the photo/outline
+  // Decorative only: keep the (much larger) glow plane and the outline out of
+  // grab picking, or their big rectangles would hijack the ray meant for the
+  // timeline whenever tray cards sit in front of the viewer. Only the photo is
+  // grabbable (see pickCardForController).
+  glow.raycast = () => {};
+  outline.raycast = () => {};
   group.add(glow, outline);
 }
 const THROW_SPEED = 0.7; // m/s release threshold for a "throw"
@@ -1144,11 +1166,13 @@ for (const i of [0, 1]) {
 // the two pinch points drives world.scale relative to where the gesture started —
 // spread hands apart to zoom in, bring them together to zoom out. This is the
 // hand-tracking analogue of the right thumbstick scale (applyThumbstickScale).
-const _handFactory = new XRHandModelFactory();
+// No visible hand model — we only need the tracked joint poses for pinch
+// detection. The hands are still added to the scene so their joint world
+// matrices update each frame; nothing is rendered for them (in AR you see your
+// real hands through passthrough anyway).
 const hands = [];
 for (const i of [0, 1]) {
   const h = renderer.xr.getHand(i);
-  h.add(_handFactory.createHandModel(h, "spheres")); // built-in, no external asset
   scene.add(h);
   hands.push(h);
 }
