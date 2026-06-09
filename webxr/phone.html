@@ -48,12 +48,8 @@
     </div>
     <footer id="bar-live">
       <button id="flip" title="Switch camera">🔄</button>
-      <button id="shutter" title="Take photo"></button>
+      <button id="shutter" title="Take &amp; send photo"></button>
       <span style="width:48px"></span>
-    </footer>
-    <footer id="bar-review" hidden>
-      <button id="retake">↺ Retake</button>
-      <button id="send" class="primary">Send to headset →</button>
     </footer>
   </div>
   <div id="toast"></div>
@@ -61,8 +57,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const video = $("video"), shot = $("shot"), msg = $("msg");
-const barLive = $("bar-live"), barReview = $("bar-review");
-let stream = null, facing = "environment", lastBlob = null;
+let stream = null, facing = "environment", sending = false;
 
 function toast(text, isErr = false, ms = 2200) {
   const t = $("toast");
@@ -97,7 +92,9 @@ function stopCamera() {
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
 }
 
-function capture() {
+// Grab the current frame and upload it straight away — no review step.
+function captureAndSend() {
+  if (sending) return; // ignore taps while one is in flight
   const w = video.videoWidth, h = video.videoHeight;
   if (!w || !h) { toast("Camera not ready yet", true); return; }
   // Cap the long edge so uploads stay small over the air.
@@ -105,48 +102,45 @@ function capture() {
   shot.width = Math.round(w * scale);
   shot.height = Math.round(h * scale);
   shot.getContext("2d").drawImage(video, 0, 0, shot.width, shot.height);
-  shot.toBlob((b) => { lastBlob = b; }, "image/jpeg", 0.9);
-  video.style.display = "none";
-  shot.style.display = "block";
-  barLive.hidden = true;
-  barReview.hidden = false;
+  shutterFlash();
+  shot.toBlob((b) => { if (b) send(b); }, "image/jpeg", 0.9);
 }
 
-function backToLive() {
-  shot.style.display = "none";
-  video.style.display = "block";
-  barReview.hidden = true;
-  barLive.hidden = false;
-  lastBlob = null;
+// Brief white flash over the viewfinder as capture feedback.
+function shutterFlash() {
+  video.style.transition = "none";
+  video.style.opacity = "0.3";
+  setTimeout(() => {
+    video.style.transition = "opacity .25s";
+    video.style.opacity = "1";
+  }, 60);
 }
 
-async function send() {
-  if (!lastBlob) return;
-  $("send").disabled = true;
+async function send(blob) {
+  sending = true;
+  $("shutter").disabled = true;
   try {
     const fd = new FormData();
-    fd.append("file", lastBlob, `phone-${Date.now()}.jpg`);
+    fd.append("file", blob, `phone-${Date.now()}.jpg`);
     const r = await fetch("/api/share", { method: "POST", body: fd });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast("✓ Sent to the headset");
-    backToLive();
   } catch (e) {
     toast("Send failed — is the headset connected?", true, 3200);
   } finally {
-    $("send").disabled = false;
+    sending = false;
+    $("shutter").disabled = false;
   }
 }
 
-$("shutter").addEventListener("click", capture);
-$("retake").addEventListener("click", backToLive);
-$("send").addEventListener("click", send);
+$("shutter").addEventListener("click", captureAndSend);
 $("flip").addEventListener("click", () => {
   facing = facing === "environment" ? "user" : "environment";
   startCamera();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopCamera();
-  else if (!stream && shot.style.display !== "block") startCamera();
+  else if (!stream) startCamera();
 });
 startCamera();
 </script>
