@@ -327,6 +327,29 @@ async function loadTimeline() {
   );
   world.add(tube);
 
+  // Glow: a couple of larger, additive, same-coloured tube shells around the
+  // core. Additive blending makes overlaps brighten (a bloom-like halo) and reads
+  // as light over AR passthrough too. (Real post-process bloom can't be used —
+  // EffectComposer doesn't compose with WebXR's stereo render loop.) Same
+  // TUBULAR/RADIAL ⇒ identical vertex count, so the viridis colours are reused.
+  for (const [radius, opacity] of [[0.03, 0.32], [0.055, 0.16]]) {
+    const gGeo = new THREE.TubeGeometry(path, TUBULAR, radius, RADIAL, false);
+    gGeo.setAttribute("color", new THREE.BufferAttribute(tcol.slice(), 3));
+    const glow = new THREE.Mesh(
+      gGeo,
+      new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    glow.renderOrder = 1;
+    world.add(glow);
+  }
+
   // Translucent "glass" sleeve enclosing the cloud — radius varies along the
   // curve with the embeddings' local spread (wider where they fan out).
   const radii = curveRadiiFromSpread(d.curve, d.rawPoints, TUBULAR);
@@ -375,6 +398,75 @@ let userCount = 0;
 
 // ── Throwable photo cards: upload → grab → throw → predict → park ───────────────
 const CARD_MAX = 0.28; // m, longest card side
+const FRAME_GAP = 0.026; // m, gap between the photo edge and the white outline
+const FRAME_GLOW = 0.06; // m, how far the soft bloom extends beyond the outline
+
+// Soft bloom texture: a white rectangle stroke with a heavy canvas blur, sized so
+// the stroke lands where the crisp outline is (FRAME_GLOW in from each edge) and
+// the blur radiates outward. Used on an additive plane behind the outline — a
+// real soft glow without post-process bloom (which can't compose with WebXR's
+// stereo render loop).
+function _frameGlowTexture(gw, gh) {
+  const LONG = 256;
+  const aspect = gw / gh;
+  const cw = aspect >= 1 ? LONG : Math.round(LONG * aspect);
+  const ch = aspect >= 1 ? Math.round(LONG / aspect) : LONG;
+  const cv = document.createElement("canvas");
+  cv.width = cw;
+  cv.height = ch;
+  const ctx = cv.getContext("2d");
+  const mx = cw * (FRAME_GLOW / gw);
+  const my = ch * (FRAME_GLOW / gh);
+  const minside = Math.min(cw, ch);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(2, minside * 0.018);
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "#ffffff";
+  ctx.shadowBlur = minside * 0.13;
+  for (let i = 0; i < 2; i++) ctx.strokeRect(mx, my, cw - 2 * mx, ch - 2 * my);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// (Re)build a card's frame as ONE crisp white outline (photo + FRAME_GAP) plus a
+// soft additive bloom plane behind it. Reused on creation and on texture resize.
+function _buildFrame(group, w, h) {
+  for (const c of group.children) {
+    c.geometry.dispose();
+    if (c.material.map) c.material.map.dispose();
+    c.material.dispose();
+  }
+  group.clear();
+
+  const ow = w + FRAME_GAP * 2;
+  const oh = h + FRAME_GAP * 2;
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(ow, oh)),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+
+  const gw = ow + FRAME_GLOW * 2;
+  const gh = oh + FRAME_GLOW * 2;
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(gw, gh),
+    new THREE.MeshBasicMaterial({
+      map: _frameGlowTexture(gw, gh),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  glow.position.z = -0.0008; // just behind the photo/outline
+  group.add(glow, outline);
+}
 const THROW_SPEED = 0.7; // m/s release threshold for a "throw"
 const GRAVITY = -1.0; // m/s² (softened for a readable arc)
 const FLIGHT_MIN = 0.5,
@@ -467,8 +559,7 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
       else w = CARD_MAX * a;
       photo.geometry.dispose();
       photo.geometry = new THREE.PlaneGeometry(w, h);
-      frame.geometry.dispose();
-      frame.geometry = new THREE.PlaneGeometry(w + 0.02, h + 0.02);
+      _buildFrame(frame, w, h);
     },
     undefined,
     () => {
@@ -481,16 +572,14 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
 // src = { kind:"file", file, name }  or  { kind:"url", url, name }
 function _makeCard(src) {
   const card = new THREE.Group();
-  const frame = new THREE.Mesh(
-    new THREE.PlaneGeometry(CARD_MAX + 0.02, CARD_MAX + 0.02),
-    new THREE.MeshBasicMaterial({ color: 0x10131c, side: THREE.DoubleSide }),
-  );
-  frame.position.z = -0.001;
   const photo = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_MAX, CARD_MAX),
     new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide }),
   );
-  card.add(frame, photo);
+  // Glowing white outline standing off the photo by FRAME_GAP, with a soft bloom.
+  const frame = new THREE.Group();
+  _buildFrame(frame, CARD_MAX, CARD_MAX);
+  card.add(photo, frame);
   card.userData = {
     src,
     photo,
