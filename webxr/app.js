@@ -38,6 +38,39 @@ function viridis(t) {
   );
 }
 
+// Rounded-rect path on a 2-D context (avoids relying on ctx.roundRect support).
+function _roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Points tracing a rounded rectangle (centred at origin, XY plane) for a LineLoop.
+function _roundedRectPoints(w, h, r, seg = 6) {
+  const hw = w / 2,
+    hh = h / 2;
+  r = Math.min(r, hw, hh);
+  const pts = [];
+  const arc = (cx, cy, a0, a1) => {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (a1 - a0) * (i / seg);
+      pts.push(
+        new THREE.Vector3(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 0),
+      );
+    }
+  };
+  arc(hw - r, hh - r, 0, Math.PI / 2); // top-right
+  arc(-hw + r, hh - r, Math.PI / 2, Math.PI); // top-left
+  arc(-hw + r, -hh + r, Math.PI, 1.5 * Math.PI); // bottom-left
+  arc(hw - r, -hh + r, 1.5 * Math.PI, 2 * Math.PI); // bottom-right
+  return pts;
+}
+
 // ── Text sprite helper ──────────────────────────────────────────────────────────
 function makeLabel(text, color = "#dfe4ff", scale = 0.16) {
   const pad = 24,
@@ -49,7 +82,8 @@ function makeLabel(text, color = "#dfe4ff", scale = 0.16) {
   cv.height = font + pad * 2;
   ctx.font = `bold ${font}px system-ui, sans-serif`;
   ctx.fillStyle = "rgba(8,10,18,0.72)";
-  ctx.fillRect(0, 0, cv.width, cv.height);
+  _roundRectPath(ctx, 0, 0, cv.width, cv.height, Math.min(cv.height * 0.4, 26));
+  ctx.fill();
   ctx.fillStyle = color;
   ctx.textBaseline = "middle";
   ctx.fillText(text, pad, cv.height / 2);
@@ -218,19 +252,24 @@ function curveRadiiFromSpread(curve, rawPoints, tubular) {
   const raw = new Float32Array(ns);
   if (rawPoints && rawPoints.length) {
     for (const p of rawPoints) {
-      let best = Infinity, bi = 0;
+      let best = Infinity,
+        bi = 0;
       for (let i = 0; i < ns; i++) {
         const dx = curve[i][0] - p[0];
         const dy = curve[i][1] - p[1];
         const dz = curve[i][2] - p[2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 < best) { best = d2; bi = i; }
+        if (d2 < best) {
+          best = d2;
+          bi = i;
+        }
       }
       const d = Math.sqrt(best);
       if (d > raw[bi]) raw[bi] = d;
     }
   }
-  const pool = new Float32Array(ns), W = 14;
+  const pool = new Float32Array(ns),
+    W = 14;
   for (let i = 0; i < ns; i++) {
     let m = 0;
     for (let k = -W; k <= W; k++) {
@@ -239,16 +278,23 @@ function curveRadiiFromSpread(curve, rawPoints, tubular) {
     }
     pool[i] = m;
   }
-  const sm = new Float32Array(ns), S = 22;
+  const sm = new Float32Array(ns),
+    S = 22;
   for (let i = 0; i < ns; i++) {
-    let s = 0, c = 0;
+    let s = 0,
+      c = 0;
     for (let k = -S; k <= S; k++) {
       const j = i + k;
-      if (j >= 0 && j < ns) { s += pool[j]; c++; }
+      if (j >= 0 && j < ns) {
+        s += pool[j];
+        c++;
+      }
     }
     sm[i] = s / c;
   }
-  const MINR = 0.02, PAD = 0.02, MAXR = 0.45;
+  const MINR = 0.02,
+    PAD = 0.02,
+    MAXR = 0.45;
   const radii = new Float32Array(tubular + 1);
   for (let i = 0; i <= tubular; i++) {
     const ci = Math.round((i / tubular) * (ns - 1));
@@ -265,10 +311,13 @@ function variableTube(path, radii, tubular, radial) {
   let o = 0;
   for (let i = 0; i <= tubular; i++) {
     path.getPointAt(i / tubular, P);
-    const N = frames.normals[i], B = frames.binormals[i], r = radii[i];
+    const N = frames.normals[i],
+      B = frames.binormals[i],
+      r = radii[i];
     for (let j = 0; j <= radial; j++) {
       const v = (j / radial) * Math.PI * 2;
-      const sn = Math.sin(v), cs = -Math.cos(v);
+      const sn = Math.sin(v),
+        cs = -Math.cos(v);
       pos[o++] = P.x + r * (cs * N.x + sn * B.x);
       pos[o++] = P.y + r * (cs * N.y + sn * B.y);
       pos[o++] = P.z + r * (cs * N.z + sn * B.z);
@@ -309,12 +358,13 @@ async function loadTimeline() {
   // the points/legend (curve param 0→1 ≈ earliest→latest year) instead of red.
   const curvePts = d.curve.map((p) => new THREE.Vector3(...p));
   const path = new THREE.CatmullRomCurve3(curvePts);
-  const TUBULAR = 600, RADIAL = 8;
+  const TUBULAR = 600,
+    RADIAL = 8;
   const tubeGeo = new THREE.TubeGeometry(path, TUBULAR, 0.012, RADIAL, false);
   const tvc = tubeGeo.attributes.position.count;
   const tcol = new Float32Array(tvc * 3);
   for (let k = 0; k < tvc; k++) {
-    const ring = Math.floor(k / (RADIAL + 1));      // verts are grouped per ring
+    const ring = Math.floor(k / (RADIAL + 1)); // verts are grouped per ring
     const c = viridis(ring / TUBULAR);
     tcol[k * 3] = c.r;
     tcol[k * 3 + 1] = c.g;
@@ -332,7 +382,10 @@ async function loadTimeline() {
   // as light over AR passthrough too. (Real post-process bloom can't be used —
   // EffectComposer doesn't compose with WebXR's stereo render loop.) Same
   // TUBULAR/RADIAL ⇒ identical vertex count, so the viridis colours are reused.
-  for (const [radius, opacity] of [[0.03, 0.32], [0.055, 0.16]]) {
+  for (const [radius, opacity] of [
+    [0.03, 0.32],
+    [0.055, 0.16],
+  ]) {
     const gGeo = new THREE.TubeGeometry(path, TUBULAR, radius, RADIAL, false);
     gGeo.setAttribute("color", new THREE.BufferAttribute(tcol.slice(), 3));
     const glow = new THREE.Mesh(
@@ -360,7 +413,7 @@ async function loadTimeline() {
       transparent: true,
       opacity: 0.1,
       side: THREE.DoubleSide,
-      depthWrite: false,                            // don't occlude the points
+      depthWrite: false, // don't occlude the points
     }),
   );
   shell.renderOrder = 2;
@@ -398,8 +451,10 @@ let userCount = 0;
 
 // ── Throwable photo cards: upload → grab → throw → predict → park ───────────────
 const CARD_MAX = 0.28; // m, longest card side
-const FRAME_GAP = 0.026; // m, gap between the photo edge and the white outline
+const FRAME_GAP = 0.016; // m, gap between the photo edge and the white outline
 const FRAME_GLOW = 0.06; // m, how far the soft bloom extends beyond the outline
+const CARD_RADIUS = 0.001; // m, rounded-corner radius of the photo itself
+const FRAME_RADIUS = CARD_RADIUS + FRAME_GAP; // concentric rounding for the frame
 
 // Soft bloom texture: a white rectangle stroke with a heavy canvas blur, sized so
 // the stroke lands where the crisp outline is (FRAME_GLOW in from each edge) and
@@ -423,9 +478,32 @@ function _frameGlowTexture(gw, gh) {
   ctx.lineJoin = "round";
   ctx.shadowColor = "#ffffff";
   ctx.shadowBlur = minside * 0.13;
-  for (let i = 0; i < 2; i++) ctx.strokeRect(mx, my, cw - 2 * mx, ch - 2 * my);
+  const radPx = FRAME_RADIUS * (cw / gw);
+  for (let i = 0; i < 2; i++) {
+    _roundRectPath(ctx, mx, my, cw - 2 * mx, ch - 2 * my, radPx);
+    ctx.stroke();
+  }
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// White rounded-rect on black, matching a w×h photo — used as the photo's
+// alphaMap so its corners read as rounded (transparent outside the radius).
+function _roundedMask(w, h) {
+  const LONG = 256;
+  const aspect = w / h;
+  const cw = aspect >= 1 ? LONG : Math.round(LONG * aspect);
+  const ch = aspect >= 1 ? Math.round(LONG / aspect) : LONG;
+  const cv = document.createElement("canvas");
+  cv.width = cw;
+  cv.height = ch;
+  const ctx = cv.getContext("2d");
+  const radPx = CARD_RADIUS * (LONG / Math.max(w, h));
+  ctx.fillStyle = "#ffffff";
+  _roundRectPath(ctx, 0, 0, cw, ch, radPx);
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
   return tex;
 }
 
@@ -441,8 +519,10 @@ function _buildFrame(group, w, h) {
 
   const ow = w + FRAME_GAP * 2;
   const oh = h + FRAME_GAP * 2;
-  const outline = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.PlaneGeometry(ow, oh)),
+  const outline = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(
+      _roundedRectPoints(ow, oh, FRAME_RADIUS),
+    ),
     new THREE.LineBasicMaterial({
       color: 0xffffff,
       transparent: true,
@@ -559,6 +639,9 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
       else w = CARD_MAX * a;
       photo.geometry.dispose();
       photo.geometry = new THREE.PlaneGeometry(w, h);
+      if (photo.material.alphaMap) photo.material.alphaMap.dispose();
+      photo.material.alphaMap = _roundedMask(w, h);
+      photo.material.needsUpdate = true;
       _buildFrame(frame, w, h);
     },
     undefined,
@@ -574,7 +657,11 @@ function _makeCard(src) {
   const card = new THREE.Group();
   const photo = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_MAX, CARD_MAX),
-    new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide }),
+    new THREE.MeshBasicMaterial({
+      color: 0x333333,
+      side: THREE.DoubleSide,
+      transparent: true, // rounded corners come from the alphaMap set on load
+    }),
   );
   // Glowing white outline standing off the photo by FRAME_GAP, with a soft bloom.
   const frame = new THREE.Group();
@@ -722,7 +809,6 @@ function throwCard(card, vel, axis, rate) {
     dead: false,
   };
   card.userData.flight = f;
-  showNotice("Estimating…", false, 0);
 
   (async () => {
     try {
@@ -734,14 +820,20 @@ function throwCard(card, vel, axis, rate) {
         const ir = await _fetchRetry(src.url, undefined, 3);
         fd.append("file", await ir.blob(), src.name || "image.jpg");
       }
-      const r = await _fetchRetry("/api/predict", { method: "POST", body: fd }, 3);
+      const r = await _fetchRetry(
+        "/api/predict",
+        { method: "POST", body: fd },
+        3,
+      );
       if (!r.ok) {
-        throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+        throw new Error(
+          (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`,
+        );
       }
       const d = await r.json();
       if (card.userData.flight !== f) return; // superseded/parked
       f.pred = d; // glide is started & timed from HERE in updateCards, so
-                  // network latency can never make it teleport.
+      // network latency can never make it teleport.
     } catch (err) {
       showNotice(`Prediction failed: ${err.message}`, true);
       f.dead = true;
@@ -758,14 +850,14 @@ function parkCard(card) {
   card.position.set(...d.position);
   viewerPose(_scratchA, _scratchQ);
   card.lookAt(_scratchA);
-  const lbl = makeLabel(`${d.name} · ~${d.year}`, "#ffffff", 0.13);
+  const lbl = makeLabel(`~${d.year}`, "#ffffff", 0.13);
   lbl.position.set(...d.position);
   lbl.position.y += 0.08;
   userGroup.add(lbl);
   card.userData.label = lbl;
   card.userData.state = "parked";
   card.userData.flight = null;
-  showNotice(`“${d.name}” → estimated ~${d.year}.`, false, 3000);
+  showNotice(`~${d.year}`, false, 1800);
   predictions.push({ name: d.name, year: d.year });
   renderPredictions();
 }
@@ -820,7 +912,8 @@ function updateCards(now) {
         f.vel.multiplyScalar(Math.exp(-3.0 * dt));
         f.vel.y += GRAVITY * 0.3 * dt;
         f.pos.addScaledVector(f.vel, dt);
-        if (f.dead || f.t > 20) {              // real failure (after retries)
+        if (f.dead || f.t > 20) {
+          // real failure (after retries)
           card.userData.flight = null;
           placeOnTray(card);
           done = true;
@@ -932,7 +1025,7 @@ function _yearColor(year) {
   const y = parseInt(year, 10);
   if (!yr || !Number.isFinite(y)) return "#888";
   const t = (y - yr[0]) / Math.max(1, yr[1] - yr[0]);
-  return viridis(t).getStyle();                     // same ramp as the point cloud
+  return viridis(t).getStyle(); // same ramp as the point cloud
 }
 
 function buildLegend() {
@@ -945,8 +1038,9 @@ function buildLegend() {
   const yr = pick.yearRange;
   if (yr) {
     document.getElementById("legend-min").textContent = yr[0];
-    document.getElementById("legend-mid").textContent =
-      Math.round((yr[0] + yr[1]) / 2);
+    document.getElementById("legend-mid").textContent = Math.round(
+      (yr[0] + yr[1]) / 2,
+    );
     document.getElementById("legend-max").textContent = yr[1];
   }
 }
@@ -958,19 +1052,21 @@ function renderPredictions() {
       '<li class="muted">none yet — throw an image at the graph</li>';
     return;
   }
-  ul.replaceChildren(...predictions.map((p) => {
-    const li = document.createElement("li");
-    const sw = document.createElement("span");
-    sw.className = "sw";
-    sw.style.background = _yearColor(p.year);
-    const nm = document.createElement("span");
-    nm.textContent = p.name;
-    const yr = document.createElement("span");
-    yr.className = "yr";
-    yr.textContent = `~${p.year}`;
-    li.append(sw, nm, yr);
-    return li;
-  }));
+  ul.replaceChildren(
+    ...predictions.map((p) => {
+      const li = document.createElement("li");
+      const sw = document.createElement("span");
+      sw.className = "sw";
+      sw.style.background = _yearColor(p.year);
+      const nm = document.createElement("span");
+      nm.textContent = p.name;
+      const yr = document.createElement("span");
+      yr.className = "yr";
+      yr.textContent = `~${p.year}`;
+      li.append(sw, nm, yr);
+      return li;
+    }),
+  );
 }
 
 document.getElementById("legend-btn").addEventListener("click", () => {
@@ -989,9 +1085,8 @@ document.getElementById("phone-btn").addEventListener("click", async () => {
   document.getElementById("phone-url").textContent = url;
   if (panel.dataset.qr) return; // already rendered
   try {
-    const { default: QRCode } = await import(
-      "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/+esm"
-    );
+    const { default: QRCode } =
+      await import("https://cdn.jsdelivr.net/npm/qrcode@1.5.3/+esm");
     await QRCode.toCanvas(document.getElementById("phone-qr"), url, {
       width: 180,
       margin: 1,
@@ -1342,7 +1437,7 @@ loadTimeline().catch((e) =>
 function receiveSharedImage(url, name) {
   const card = spawnExampleCard(url, name || "photo");
   throwCard(card);
-  showNotice(`📷 ${name || "photo"} received — estimating…`, false, 2500);
+  showNotice("📷 Received", false, 1500);
 }
 
 const _seenShareIds = new Set();
