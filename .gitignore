@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
-.venv/
+
+# Local dev-only Compose override (bind-mounts webxr/ for live editing)
+docker-compose.override.yml
