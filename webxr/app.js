@@ -473,7 +473,6 @@ const CARD_RADIUS = 0.001; // m, rounded-corner radius of the photo itself
 const FRAME_RADIUS = CARD_RADIUS + FRAME_GAP; // concentric rounding for the frame
 
 // Parked-prediction presentation (see the "parked" branch in updateCards):
-const PARK_SPIN = 0.0005; // rad/ms turntable spin (~one turn per 12.5 s)
 const PARK_REF_DIST = 2.0; // m at which a parked card is shown at its native size
 const PARK_MIN_SCALE = 0.7; // clamp so close-up cards don't shrink to nothing
 const PARK_MAX_SCALE = 4.0; // …and far-away ones don't balloon
@@ -937,7 +936,8 @@ function updateCards(now) {
     } else if (u.state === "parked") {
       // Parked predictions stay anchored at their year on the timeline. Two cues
       // keep them legible from anywhere in the room:
-      //  (1) a slow turntable spin so they're always in motion and catch the eye;
+      //  (1) they billboard to always face the viewer, so the image is readable
+      //      from any angle in the room;
       //  (2) distance-compensated size — bigger the further the viewer is — so the
       //      image holds a readable apparent size across the room. We divide by the
       //      world scale so the zoom and the distance-grow don't compound.
@@ -951,7 +951,7 @@ function updateCards(now) {
         PARK_MAX_SCALE,
       );
       card.scale.setScalar(f);
-      card.rotation.set(0, now * PARK_SPIN, 0);
+      card.lookAt(_scratchA); // billboard: always face the viewer
       // Float the year label just above the (scaled) card and tie it back with the
       // stem, so "~2024" never overlaps the image but stays connected to it. The
       // label sprite already billboards; we only scale + reposition it.
