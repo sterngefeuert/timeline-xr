@@ -1,9 +1,4 @@
-# Reproduction Guide — Timeline-VLM WebXR
-
-This document gives step-by-step instructions to reproduce the system demonstrated
-in our research demo, an immersive **WebXR** visualization of the temporal manifold
-from *Can Vision-Language Models Tell When Things Were Made?*
-([arXiv:2510.19559](https://arxiv.org/pdf/2510.19559)).
+# Timeline-VLM WebXR
 
 The demo (a) renders precomputed CLIP timeline embeddings (years **1700–2024**) as a
 3-D point cloud threaded by a learned Bézier *time-axis*, explorable in VR or by
@@ -114,7 +109,7 @@ a `WARNING:` line telling you to run `git lfs pull`.
 
 ---
 
-## 5. Via Docker (recommended for a clean environment)
+## 5. Docker
 
 The image installs `git-lfs`, resolves LFS blobs at build, and pre-downloads CLIP so
 the first request is instant and runtime needs no Hugging Face access.

@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+.claude/
+Claude.md
 
 # Local dev-only Compose override (bind-mounts webxr/ for live editing)
 docker-compose.override.yml
