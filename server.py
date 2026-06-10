@@ -14,15 +14,24 @@ Run:
     python server.py        # http://localhost:7860
 """
 
+import asyncio
 import io
+import json
 import os
 import threading
+import time
+import uuid
 
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sklearn.decomposition import KernelPCA
@@ -157,6 +166,19 @@ def get_scene(backbone="clip", n_ctrl=300):
 app = FastAPI(title="Timeline-VLM WebXR")
 
 
+# The frontend has no build step / content hashing, so a long-lived cache makes
+# headsets keep running stale JS across deploys (this bit the phone-share rollout:
+# the Quest served a cached app.js without the SSE client). Force revalidation on
+# the HTML/JS entrypoints — they're tiny, and ETags still yield 304s when unchanged.
+@app.middleware("http")
+async def _no_store_frontend(request: Request, call_next):
+    resp = await call_next(request)
+    path = request.url.path
+    if path in ("/", "/phone") or path.endswith((".html", ".js")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.get("/api/timeline")
 def api_timeline(backbone: str = "clip", n_ctrl: int = 300):
     return get_scene(backbone, n_ctrl)["json"]
@@ -205,7 +227,19 @@ def api_predict(file: UploadFile = File(...), backbone: str = "clip"):
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(WEBXR_DIR, "index.html"))
+    # No build step → no content-hashed asset names, and the reverse proxy slaps a
+    # long max-age on *.js that overrides our no-cache header. So stamp app.js with
+    # its mtime: the URL changes whenever the file does, forcing a fresh fetch on
+    # the next deploy regardless of the cached copy. `/` itself is served no-cache
+    # (see _no_store_frontend), so the headset always gets the current stamp.
+    with open(os.path.join(WEBXR_DIR, "index.html")) as f:
+        html = f.read()
+    try:
+        ver = int(os.path.getmtime(os.path.join(WEBXR_DIR, "app.js")))
+    except OSError:
+        ver = 0
+    html = html.replace('src="./app.js"', f'src="./app.js?v={ver}"')
+    return HTMLResponse(html)
 
 
 @app.get("/api/examples")
@@ -218,6 +252,100 @@ def api_examples():
     except FileNotFoundError:
         names = []
     return {"examples": names}
+
+
+# ── Phone → headset photo sharing ───────────────────────────────────────────────
+# A phone opens GET /phone, snaps a picture in-browser, and POSTs it to
+# /api/share. The headset page holds an SSE connection to /api/share/stream and
+# spawns + auto-throws the photo the instant it arrives. Single global room (any
+# phone → every connected headset); images are held in memory and served back by
+# id. Kept deliberately tiny — no DB, no auth — for the homelab demo.
+_subscribers: "set[asyncio.Queue]" = set()
+_shared_images: "dict[str, dict]" = {}
+_SHARED_MAX = 24  # cap retained images so memory can't grow unbounded
+# A headset that connects (or reconnects) just after a phone send would otherwise
+# miss it — SSE only reaches subscribers live at send time. So remember the last
+# event and replay it to a freshly-connected stream within this window; the client
+# dedups by id, so a keepalive reconnect never re-throws the same photo.
+_last_event = None  # (event_dict, monotonic_ts)
+_REPLAY_WINDOW = 90  # s
+
+
+@app.get("/phone")
+def phone():
+    return FileResponse(os.path.join(WEBXR_DIR, "phone.html"))
+
+
+@app.post("/api/share")
+async def api_share(file: UploadFile = File(...)):
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty upload.")
+    img_id = uuid.uuid4().hex
+    _shared_images[img_id] = {
+        "bytes": data,
+        "type": file.content_type or "image/jpeg",
+        "name": file.filename or "photo.jpg",
+    }
+    # Evict oldest beyond the cap (dicts keep insertion order).
+    while len(_shared_images) > _SHARED_MAX:
+        _shared_images.pop(next(iter(_shared_images)))
+    event = {
+        "id": img_id,
+        "name": _shared_images[img_id]["name"],
+        "url": f"/api/share/img/{img_id}",
+    }
+    global _last_event
+    _last_event = (event, time.monotonic())
+    for q in list(_subscribers):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # a wedged subscriber shouldn't block the sender
+    return {"ok": True, "id": img_id}
+
+
+@app.get("/api/share/img/{img_id}")
+def api_share_img(img_id: str):
+    rec = _shared_images.get(img_id)
+    if not rec:
+        raise HTTPException(404, "No such shared image.")
+    return Response(content=rec["bytes"], media_type=rec["type"])
+
+
+@app.get("/api/share/stream")
+async def api_share_stream(request: Request):
+    """Server-Sent Events: one message per shared photo, plus periodic
+    keepalive comments so proxies/the browser hold the connection open."""
+    q: "asyncio.Queue" = asyncio.Queue(maxsize=32)
+    _subscribers.add(q)
+
+    async def gen():
+        try:
+            yield ": connected\n\n"  # comment line — opens the stream immediately
+            le = _last_event
+            if le and (time.monotonic() - le[1]) < _REPLAY_WINDOW:
+                yield f"data: {json.dumps(le[0])}\n\n"  # catch a just-missed send
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _subscribers.discard(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable proxy buffering (nginx, etc.)
+        },
+    )
 
 
 if os.path.isdir(EXAMPLES_DIR):

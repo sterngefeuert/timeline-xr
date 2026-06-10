@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>📷 Send to Timeline-XR</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #05060a; color: #e7e9ee;
+    font-family: -apple-system, system-ui, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  header { padding: 12px 16px; font-size: 15px; font-weight: 600;
+    text-align: center; border-bottom: 1px solid #2a2f45; }
+  header small { display: block; font-weight: 400; font-size: 11.5px;
+    color: #8b93a7; margin-top: 2px; }
+  #view { position: relative; flex: 1; min-height: 0; background: #000;
+    display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  video, #shot { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #shot { display: none; }
+  #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    text-align: center; color: #aab0c4; font-size: 13px; padding: 0 24px; line-height: 1.5; }
+  footer { padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    display: flex; gap: 12px; align-items: center; justify-content: center; }
+  button { font: inherit; font-size: 15px; color: #e7e9ee; cursor: pointer;
+    background: #1c2238; border: 1px solid #353c5c; border-radius: 12px; padding: 12px 18px; }
+  button:disabled { opacity: .45; }
+  button.primary { background: #2b3a64; border-color: #4a5da0; }
+  #shutter { width: 72px; height: 72px; border-radius: 50%; padding: 0;
+    background: #e7e9ee; border: 4px solid #4a5da0; }
+  #shutter:active { transform: scale(.94); }
+  #toast { position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%);
+    background: rgba(20,28,48,.95); border: 1px solid #4a5da0; border-radius: 10px;
+    padding: 10px 16px; font-size: 13px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; white-space: nowrap; }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: #ff8a8a; color: #ff8a8a; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <header>📷 Send a photo to the headset
+      <small>It flies into the timeline and gets a year estimate.</small>
+    </header>
+    <div id="view">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="shot"></canvas>
+      <div id="msg" hidden></div>
+    </div>
+    <footer id="bar-live">
+      <button id="flip" title="Switch camera">🔄</button>
+      <button id="shutter" title="Take &amp; send photo"></button>
+      <span style="width:48px"></span>
+    </footer>
+  </div>
+  <div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $("video"), shot = $("shot"), msg = $("msg");
+let stream = null, facing = "environment", sending = false;
+
+function toast(text, isErr = false, ms = 2200) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => (t.className = ""), ms);
+}
+
+function showMsg(text) { msg.hidden = false; msg.textContent = text; }
+
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showMsg("This browser can't access the camera. Open over HTTPS in Safari/Chrome.");
+    $("shutter").disabled = $("flip").disabled = true;
+    return;
+  }
+  stopCamera();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing } }, audio: false,
+    });
+    video.srcObject = stream;
+    msg.hidden = true;
+  } catch (e) {
+    showMsg("Camera access was blocked. Allow camera permission and reload.");
+    $("shutter").disabled = true;
+  }
+}
+
+function stopCamera() {
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+}
+
+// Grab the current frame and upload it straight away — no review step.
+function captureAndSend() {
+  if (sending) return; // ignore taps while one is in flight
+  const w = video.videoWidth, h = video.videoHeight;
+  if (!w || !h) { toast("Camera not ready yet", true); return; }
+  // Cap the long edge so uploads stay small over the air.
+  const MAX = 1280, scale = Math.min(1, MAX / Math.max(w, h));
+  shot.width = Math.round(w * scale);
+  shot.height = Math.round(h * scale);
+  shot.getContext("2d").drawImage(video, 0, 0, shot.width, shot.height);
+  shutterFlash();
+  shot.toBlob((b) => { if (b) send(b); }, "image/jpeg", 0.9);
+}
+
+// Brief white flash over the viewfinder as capture feedback.
+function shutterFlash() {
+  video.style.transition = "none";
+  video.style.opacity = "0.3";
+  setTimeout(() => {
+    video.style.transition = "opacity .25s";
+    video.style.opacity = "1";
+  }, 60);
+}
+
+async function send(blob) {
+  sending = true;
+  $("shutter").disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("file", blob, `phone-${Date.now()}.jpg`);
+    const r = await fetch("/api/share", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    toast("✓ Sent to the headset");
+  } catch (e) {
+    toast("Send failed — is the headset connected?", true, 3200);
+  } finally {
+    sending = false;
+    $("shutter").disabled = false;
+  }
+}
+
+$("shutter").addEventListener("click", captureAndSend);
+$("flip").addEventListener("click", () => {
+  facing = facing === "environment" ? "user" : "environment";
+  startCamera();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopCamera();
+  else if (!stream) startCamera();
+});
+startCamera();
+</script>
+</body>
+</html>

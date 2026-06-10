@@ -32,6 +32,11 @@
   #legend { margin-top: 12px; border-top: 1px solid #2a2f45; padding-top: 10px;
     max-height: 40vh; overflow-y: auto; }
   #legend[hidden] { display: none; }
+  #phone-panel { margin-top: 12px; border-top: 1px solid #2a2f45;
+    padding-top: 10px; text-align: center; }
+  #phone-panel[hidden] { display: none; }
+  #phone-qr { background: #fff; border-radius: 8px; max-width: 100%; }
+  #phone-url { font-size: 12px; color: #7aa2ff; word-break: break-all; margin: 8px 0 0; }
   .legend-title { font-size: 12px; color: #aab0c4; margin: 0 0 6px; }
   #legend-bar { height: 14px; border-radius: 4px; border: 1px solid #2a2f45; }
   #legend-axis { display: flex; justify-content: space-between;
@@ -59,13 +64,21 @@
     <p>The CLIP temporal manifold (1700–2024) as an immersive 3-D point cloud,
        threaded by its learned Bézier time-axis.</p>
     <p><b>Desktop:</b> drag to orbit, scroll to zoom.<br/>
-       <b>VR:</b> trigger-grab to move/rotate the model, right thumbstick to scale.</p>
+       <b>VR:</b> trigger-grab to move/rotate the model, right thumbstick to scale.<br/>
+       <b>Hands:</b> pinch both hands and spread apart / together to zoom.</p>
     <div class="row">
       <label class="btn">📷 Estimate an image
         <input id="file" type="file" accept="image/*" hidden />
       </label>
       <label class="toggle"><input id="raw" type="checkbox" /> raw embeddings</label>
       <button id="legend-btn" type="button">🎨 Legend</button>
+      <button id="phone-btn" type="button">📱 Phone cam</button>
+    </div>
+    <div id="phone-panel" hidden>
+      <p class="legend-title">Open this on your phone, then take a photo — it flies
+        into the timeline here:</p>
+      <canvas id="phone-qr" width="180" height="180"></canvas>
+      <p id="phone-url"></p>
     </div>
     <div class="row" id="xr-slot"></div>
     <div id="status"></div>

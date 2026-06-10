@@ -37,6 +37,39 @@ function viridis(t) {
   );
 }
 
+// Rounded-rect path on a 2-D context (avoids relying on ctx.roundRect support).
+function _roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Points tracing a rounded rectangle (centred at origin, XY plane) for a LineLoop.
+function _roundedRectPoints(w, h, r, seg = 6) {
+  const hw = w / 2,
+    hh = h / 2;
+  r = Math.min(r, hw, hh);
+  const pts = [];
+  const arc = (cx, cy, a0, a1) => {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (a1 - a0) * (i / seg);
+      pts.push(
+        new THREE.Vector3(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 0),
+      );
+    }
+  };
+  arc(hw - r, hh - r, 0, Math.PI / 2); // top-right
+  arc(-hw + r, hh - r, Math.PI / 2, Math.PI); // top-left
+  arc(-hw + r, -hh + r, Math.PI, 1.5 * Math.PI); // bottom-left
+  arc(hw - r, -hh + r, 1.5 * Math.PI, 2 * Math.PI); // bottom-right
+  return pts;
+}
+
 // ── Text sprite helper ──────────────────────────────────────────────────────────
 function makeLabel(text, color = "#dfe4ff", scale = 0.16) {
   const pad = 24,
@@ -48,7 +81,8 @@ function makeLabel(text, color = "#dfe4ff", scale = 0.16) {
   cv.height = font + pad * 2;
   ctx.font = `bold ${font}px system-ui, sans-serif`;
   ctx.fillStyle = "rgba(8,10,18,0.72)";
-  ctx.fillRect(0, 0, cv.width, cv.height);
+  _roundRectPath(ctx, 0, 0, cv.width, cv.height, Math.min(cv.height * 0.4, 26));
+  ctx.fill();
   ctx.fillStyle = color;
   ctx.textBaseline = "middle";
   ctx.fillText(text, pad, cv.height / 2);
@@ -113,12 +147,22 @@ document.body.appendChild(renderer.domElement);
 // Quest Browser lacks — you pick an image already on the headset.)
 const CAM_CAP = { arSupported: false };
 function _mountXrButton(useAR) {
+  // Request `unbounded` so you can walk around freely instead of being confined to
+  // the drawn play-area; `bounded-floor` is deliberately NOT requested. If the
+  // runtime grants unbounded we switch the reference space to it on sessionstart.
   const btn = useAR
     ? ARButton.createButton(renderer, {
-        optionalFeatures: ["dom-overlay", "local-floor", "hand-tracking"],
+        optionalFeatures: [
+          "dom-overlay",
+          "local-floor",
+          "unbounded",
+          "hand-tracking",
+        ],
         domOverlay: { root: document.getElementById("overlay") },
       })
-    : VRButton.createButton(renderer);
+    : VRButton.createButton(renderer, {
+        optionalFeatures: ["local-floor", "unbounded", "hand-tracking"],
+      });
   btn.style.position = "static";
   btn.style.transform = "none";
   document.getElementById("xr-slot").appendChild(btn);
@@ -144,8 +188,17 @@ scene.add(grid);
 // backdrop/fog/grid so the real room shows through; restore for VR/desktop.
 const _look = { bg: scene.background, fog: scene.fog };
 let _trayReplaceAt = 0; // re-seat the shelf at the viewer
-renderer.xr.addEventListener("sessionstart", () => {
+renderer.xr.addEventListener("sessionstart", async () => {
   const s = renderer.xr.getSession();
+  // Roam freely: if the runtime granted `unbounded`, use it as the reference
+  // space so you aren't clamped to the guardian play-area. Falls back silently to
+  // the default (local-floor) where unbounded isn't supported.
+  try {
+    const ref = await s.requestReferenceSpace("unbounded");
+    renderer.xr.setReferenceSpace(ref);
+  } catch {
+    /* unbounded unsupported — keep local-floor */
+  }
   if (s && s.environmentBlendMode && s.environmentBlendMode !== "opaque") {
     scene.background = null;
     scene.fog = null;
@@ -215,19 +268,24 @@ function curveRadiiFromSpread(curve, rawPoints, tubular) {
   const raw = new Float32Array(ns);
   if (rawPoints && rawPoints.length) {
     for (const p of rawPoints) {
-      let best = Infinity, bi = 0;
+      let best = Infinity,
+        bi = 0;
       for (let i = 0; i < ns; i++) {
         const dx = curve[i][0] - p[0];
         const dy = curve[i][1] - p[1];
         const dz = curve[i][2] - p[2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 < best) { best = d2; bi = i; }
+        if (d2 < best) {
+          best = d2;
+          bi = i;
+        }
       }
       const d = Math.sqrt(best);
       if (d > raw[bi]) raw[bi] = d;
     }
   }
-  const pool = new Float32Array(ns), W = 14;
+  const pool = new Float32Array(ns),
+    W = 14;
   for (let i = 0; i < ns; i++) {
     let m = 0;
     for (let k = -W; k <= W; k++) {
@@ -236,16 +294,23 @@ function curveRadiiFromSpread(curve, rawPoints, tubular) {
     }
     pool[i] = m;
   }
-  const sm = new Float32Array(ns), S = 22;
+  const sm = new Float32Array(ns),
+    S = 22;
   for (let i = 0; i < ns; i++) {
-    let s = 0, c = 0;
+    let s = 0,
+      c = 0;
     for (let k = -S; k <= S; k++) {
       const j = i + k;
-      if (j >= 0 && j < ns) { s += pool[j]; c++; }
+      if (j >= 0 && j < ns) {
+        s += pool[j];
+        c++;
+      }
     }
     sm[i] = s / c;
   }
-  const MINR = 0.02, PAD = 0.02, MAXR = 0.45;
+  const MINR = 0.02,
+    PAD = 0.02,
+    MAXR = 0.45;
   const radii = new Float32Array(tubular + 1);
   for (let i = 0; i <= tubular; i++) {
     const ci = Math.round((i / tubular) * (ns - 1));
@@ -262,10 +327,13 @@ function variableTube(path, radii, tubular, radial) {
   let o = 0;
   for (let i = 0; i <= tubular; i++) {
     path.getPointAt(i / tubular, P);
-    const N = frames.normals[i], B = frames.binormals[i], r = radii[i];
+    const N = frames.normals[i],
+      B = frames.binormals[i],
+      r = radii[i];
     for (let j = 0; j <= radial; j++) {
       const v = (j / radial) * Math.PI * 2;
-      const sn = Math.sin(v), cs = -Math.cos(v);
+      const sn = Math.sin(v),
+        cs = -Math.cos(v);
       pos[o++] = P.x + r * (cs * N.x + sn * B.x);
       pos[o++] = P.y + r * (cs * N.y + sn * B.y);
       pos[o++] = P.z + r * (cs * N.z + sn * B.z);
@@ -306,12 +374,13 @@ async function loadTimeline() {
   // the points/legend (curve param 0→1 ≈ earliest→latest year) instead of red.
   const curvePts = d.curve.map((p) => new THREE.Vector3(...p));
   const path = new THREE.CatmullRomCurve3(curvePts);
-  const TUBULAR = 600, RADIAL = 8;
+  const TUBULAR = 600,
+    RADIAL = 8;
   const tubeGeo = new THREE.TubeGeometry(path, TUBULAR, 0.012, RADIAL, false);
   const tvc = tubeGeo.attributes.position.count;
   const tcol = new Float32Array(tvc * 3);
   for (let k = 0; k < tvc; k++) {
-    const ring = Math.floor(k / (RADIAL + 1));      // verts are grouped per ring
+    const ring = Math.floor(k / (RADIAL + 1)); // verts are grouped per ring
     const c = viridis(ring / TUBULAR);
     tcol[k * 3] = c.r;
     tcol[k * 3 + 1] = c.g;
@@ -324,6 +393,32 @@ async function loadTimeline() {
   );
   world.add(tube);
 
+  // Glow: a couple of larger, additive, same-coloured tube shells around the
+  // core. Additive blending makes overlaps brighten (a bloom-like halo) and reads
+  // as light over AR passthrough too. (Real post-process bloom can't be used —
+  // EffectComposer doesn't compose with WebXR's stereo render loop.) Same
+  // TUBULAR/RADIAL ⇒ identical vertex count, so the viridis colours are reused.
+  for (const [radius, opacity] of [
+    [0.03, 0.32],
+    [0.055, 0.16],
+  ]) {
+    const gGeo = new THREE.TubeGeometry(path, TUBULAR, radius, RADIAL, false);
+    gGeo.setAttribute("color", new THREE.BufferAttribute(tcol.slice(), 3));
+    const glow = new THREE.Mesh(
+      gGeo,
+      new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    glow.renderOrder = 1;
+    world.add(glow);
+  }
+
   // Translucent "glass" sleeve enclosing the cloud — radius varies along the
   // curve with the embeddings' local spread (wider where they fan out).
   const radii = curveRadiiFromSpread(d.curve, d.rawPoints, TUBULAR);
@@ -334,20 +429,33 @@ async function loadTimeline() {
       transparent: true,
       opacity: 0.1,
       side: THREE.DoubleSide,
-      depthWrite: false,                            // don't occlude the points
+      depthWrite: false, // don't occlude the points
     }),
   );
   shell.renderOrder = 2;
   world.add(shell);
 
-  // ~12 year labels evenly along the timeline.
+  // ~12 year labels evenly along the timeline, offset to the SIDE of the ribbon
+  // (perpendicular to the local timeline tangent, in the horizontal plane) so the
+  // thrown image cards — which park centred on the curve and face the viewer —
+  // don't overlap them. Offset (0.26 m) exceeds the card half-width (CARD_MAX/2).
   const N = d.points.length;
   const steps = 12;
+  const _tan = new THREE.Vector3();
+  const _side = new THREE.Vector3();
+  const _up = new THREE.Vector3(0, 1, 0);
+  const SIDE_OFFSET = 0.26;
   for (let s = 0; s < steps; s++) {
     const i = Math.round((s / (steps - 1)) * (N - 1));
     const lbl = makeLabel(String(d.labels[i]), "#cdd5ff", 0.12);
-    lbl.position.set(...d.points[i]);
-    lbl.position.y += 0.05;
+    const p = d.points[i];
+    const a = d.points[Math.max(0, i - 1)];
+    const b = d.points[Math.min(N - 1, i + 1)];
+    _tan.set(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    _side.crossVectors(_tan, _up); // horizontal, perpendicular to the timeline
+    if (_side.lengthSq() < 1e-6) _side.set(1, 0, 0); // tangent ≈ vertical → fallback
+    _side.normalize().multiplyScalar(SIDE_OFFSET);
+    lbl.position.set(p[0] + _side.x, p[1] + _side.y + 0.05, p[2] + _side.z);
     world.add(lbl);
   }
   setStatus(`Loaded ${N} years · ${d.yearRange[0]}–${d.yearRange[1]}.`);
@@ -359,6 +467,114 @@ let userCount = 0;
 
 // ── Throwable photo cards: upload → grab → throw → predict → park ───────────────
 const CARD_MAX = 0.28; // m, longest card side
+const FRAME_GAP = 0.016; // m, gap between the photo edge and the white outline
+const FRAME_GLOW = 0.06; // m, how far the soft bloom extends beyond the outline
+const CARD_RADIUS = 0.001; // m, rounded-corner radius of the photo itself
+const FRAME_RADIUS = CARD_RADIUS + FRAME_GAP; // concentric rounding for the frame
+
+// Parked-prediction presentation (see the "parked" branch in updateCards):
+const PARK_REF_DIST = 2.0; // m at which a parked card is shown at its native size
+const PARK_MIN_SCALE = 0.7; // clamp so close-up cards don't shrink to nothing
+const PARK_MAX_SCALE = 4.0; // …and far-away ones don't balloon
+const PARK_HOVER_SCALE = 1.25; // pop a hovered parked card slightly larger
+
+// Soft bloom texture: a white rectangle stroke with a heavy canvas blur, sized so
+// the stroke lands where the crisp outline is (FRAME_GLOW in from each edge) and
+// the blur radiates outward. Used on an additive plane behind the outline — a
+// real soft glow without post-process bloom (which can't compose with WebXR's
+// stereo render loop).
+function _frameGlowTexture(gw, gh) {
+  const LONG = 256;
+  const aspect = gw / gh;
+  const cw = aspect >= 1 ? LONG : Math.round(LONG * aspect);
+  const ch = aspect >= 1 ? Math.round(LONG / aspect) : LONG;
+  const cv = document.createElement("canvas");
+  cv.width = cw;
+  cv.height = ch;
+  const ctx = cv.getContext("2d");
+  const mx = cw * (FRAME_GLOW / gw);
+  const my = ch * (FRAME_GLOW / gh);
+  const minside = Math.min(cw, ch);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(2, minside * 0.018);
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "#ffffff";
+  ctx.shadowBlur = minside * 0.13;
+  const radPx = FRAME_RADIUS * (cw / gw);
+  for (let i = 0; i < 2; i++) {
+    _roundRectPath(ctx, mx, my, cw - 2 * mx, ch - 2 * my, radPx);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// White rounded-rect on black, matching a w×h photo — used as the photo's
+// alphaMap so its corners read as rounded (transparent outside the radius).
+function _roundedMask(w, h) {
+  const LONG = 256;
+  const aspect = w / h;
+  const cw = aspect >= 1 ? LONG : Math.round(LONG * aspect);
+  const ch = aspect >= 1 ? Math.round(LONG / aspect) : LONG;
+  const cv = document.createElement("canvas");
+  cv.width = cw;
+  cv.height = ch;
+  const ctx = cv.getContext("2d");
+  const radPx = CARD_RADIUS * (LONG / Math.max(w, h));
+  ctx.fillStyle = "#ffffff";
+  _roundRectPath(ctx, 0, 0, cw, ch, radPx);
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
+  return tex;
+}
+
+// (Re)build a card's frame as ONE crisp white outline (photo + FRAME_GAP) plus a
+// soft additive bloom plane behind it. Reused on creation and on texture resize.
+function _buildFrame(group, w, h) {
+  for (const c of group.children) {
+    c.geometry.dispose();
+    if (c.material.map) c.material.map.dispose();
+    c.material.dispose();
+  }
+  group.clear();
+
+  const ow = w + FRAME_GAP * 2;
+  const oh = h + FRAME_GAP * 2;
+  const outline = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(
+      _roundedRectPoints(ow, oh, FRAME_RADIUS),
+    ),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+
+  const gw = ow + FRAME_GLOW * 2;
+  const gh = oh + FRAME_GLOW * 2;
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(gw, gh),
+    new THREE.MeshBasicMaterial({
+      map: _frameGlowTexture(gw, gh),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  glow.position.z = -0.0008; // just behind the photo/outline
+  // Decorative only: keep the (much larger) glow plane and the outline out of
+  // grab picking, or their big rectangles would hijack the ray meant for the
+  // timeline whenever tray cards sit in front of the viewer. Only the photo is
+  // grabbable (see pickCardForController).
+  glow.raycast = () => {};
+  outline.raycast = () => {};
+  group.add(glow, outline);
+}
 const THROW_SPEED = 0.7; // m/s release threshold for a "throw"
 const GRAVITY = -1.0; // m/s² (softened for a readable arc)
 const FLIGHT_MIN = 0.5,
@@ -434,7 +650,7 @@ function placeOnTray(card) {
 
 let _cardSlot = 0;
 
-function _applyCardTexture(card, photo, frame, texUrl, revoke) {
+function _applyCardTexture(card, photo, frame, texUrl, revoke, onReady) {
   _texLoader.load(
     texUrl,
     (t) => {
@@ -451,8 +667,11 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
       else w = CARD_MAX * a;
       photo.geometry.dispose();
       photo.geometry = new THREE.PlaneGeometry(w, h);
-      frame.geometry.dispose();
-      frame.geometry = new THREE.PlaneGeometry(w + 0.02, h + 0.02);
+      if (photo.material.alphaMap) photo.material.alphaMap.dispose();
+      photo.material.alphaMap = _roundedMask(w, h);
+      photo.material.needsUpdate = true;
+      _buildFrame(frame, w, h);
+      if (onReady) onReady();
     },
     undefined,
     () => {
@@ -465,16 +684,18 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
 // src = { kind:"file", file, name }  or  { kind:"url", url, name }
 function _makeCard(src) {
   const card = new THREE.Group();
-  const frame = new THREE.Mesh(
-    new THREE.PlaneGeometry(CARD_MAX + 0.02, CARD_MAX + 0.02),
-    new THREE.MeshBasicMaterial({ color: 0x10131c, side: THREE.DoubleSide }),
-  );
-  frame.position.z = -0.001;
   const photo = new THREE.Mesh(
     new THREE.PlaneGeometry(CARD_MAX, CARD_MAX),
-    new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide }),
+    new THREE.MeshBasicMaterial({
+      color: 0x333333,
+      side: THREE.DoubleSide,
+      transparent: true, // rounded corners come from the alphaMap set on load
+    }),
   );
-  card.add(frame, photo);
+  // Glowing white outline standing off the photo by FRAME_GAP, with a soft bloom.
+  const frame = new THREE.Group();
+  _buildFrame(frame, CARD_MAX, CARD_MAX);
+  card.add(photo, frame);
   card.userData = {
     src,
     photo,
@@ -503,9 +724,9 @@ function spawnPhotoCard(file) {
   return card;
 }
 
-function spawnExampleCard(url, name) {
+function spawnExampleCard(url, name, onReady) {
   const { card, photo, frame } = _makeCard({ kind: "url", url, name });
-  _applyCardTexture(card, photo, frame, url, false);
+  _applyCardTexture(card, photo, frame, url, false, onReady);
   return card;
 }
 
@@ -617,7 +838,6 @@ function throwCard(card, vel, axis, rate) {
     dead: false,
   };
   card.userData.flight = f;
-  showNotice("Estimating…", false, 0);
 
   (async () => {
     try {
@@ -629,14 +849,20 @@ function throwCard(card, vel, axis, rate) {
         const ir = await _fetchRetry(src.url, undefined, 3);
         fd.append("file", await ir.blob(), src.name || "image.jpg");
       }
-      const r = await _fetchRetry("/api/predict", { method: "POST", body: fd }, 3);
+      const r = await _fetchRetry(
+        "/api/predict",
+        { method: "POST", body: fd },
+        3,
+      );
       if (!r.ok) {
-        throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+        throw new Error(
+          (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`,
+        );
       }
       const d = await r.json();
       if (card.userData.flight !== f) return; // superseded/parked
       f.pred = d; // glide is started & timed from HERE in updateCards, so
-                  // network latency can never make it teleport.
+      // network latency can never make it teleport.
     } catch (err) {
       showNotice(`Prediction failed: ${err.message}`, true);
       f.dead = true;
@@ -653,14 +879,30 @@ function parkCard(card) {
   card.position.set(...d.position);
   viewerPose(_scratchA, _scratchQ);
   card.lookAt(_scratchA);
-  const lbl = makeLabel(`${d.name} · ~${d.year}`, "#ffffff", 0.13);
+  const lbl = makeLabel(`~${d.year}`, "#ffffff", 0.13);
+  lbl.userData.baseScale = lbl.scale.clone(); // distance-scaling is relative to this
   lbl.position.set(...d.position);
-  lbl.position.y += 0.08;
   userGroup.add(lbl);
   card.userData.label = lbl;
+  // A thin stem keeps the floating year tied to its (spinning) image — placed and
+  // sized every frame in updateCards' parked branch.
+  const stem = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(),
+      new THREE.Vector3(),
+    ]),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+    }),
+  );
+  userGroup.add(stem);
+  card.userData.stem = stem;
   card.userData.state = "parked";
   card.userData.flight = null;
-  showNotice(`“${d.name}” → estimated ~${d.year}.`, false, 3000);
+  showNotice(`~${d.year}`, false, 1800);
   predictions.push({ name: d.name, year: d.year });
   renderPredictions();
 }
@@ -693,6 +935,47 @@ function updateCards(now) {
     } else if (u.state === "tray") {
       viewerPose(_scratchA, _scratchQ);
       card.lookAt(_scratchA);
+    } else if (u.state === "parked") {
+      // Parked predictions stay anchored at their year on the timeline. Two cues
+      // keep them legible from anywhere in the room:
+      //  (1) they billboard to always face the viewer, so the image is readable
+      //      from any angle in the room;
+      //  (2) distance-compensated size — bigger the further the viewer is — so the
+      //      image holds a readable apparent size across the room. We divide by the
+      //      world scale so the zoom and the distance-grow don't compound.
+      viewerPose(_scratchA, _scratchQ); // _scratchA = viewer world position
+      card.getWorldPosition(_scratchB);
+      const wscale = world.scale.x || 1;
+      const dist = _scratchA.distanceTo(_scratchB);
+      let f = THREE.MathUtils.clamp(
+        dist / (PARK_REF_DIST * wscale),
+        PARK_MIN_SCALE,
+        PARK_MAX_SCALE,
+      );
+      if (u.parkedHover) f *= PARK_HOVER_SCALE; // pop when pointed at
+      card.scale.setScalar(f);
+      card.lookAt(_scratchA); // billboard: always face the viewer
+      // Float the year label just above the (scaled) card and tie it back with the
+      // stem, so "~2024" never overlaps the image but stays connected to it. The
+      // label sprite already billboards; we only scale + reposition it.
+      const lbl = u.label;
+      if (lbl) {
+        const ph = u.photo.geometry.parameters.height || CARD_MAX;
+        const top = (ph / 2) * f + FRAME_GAP + 0.05; // card top edge + a margin
+        lbl.scale.copy(lbl.userData.baseScale).multiplyScalar(f);
+        const half = lbl.scale.y / 2;
+        lbl.position.set(
+          card.position.x,
+          card.position.y + top + half,
+          card.position.z,
+        );
+        if (u.stem) {
+          const p = u.stem.geometry.attributes.position;
+          p.setXYZ(0, card.position.x, card.position.y + top, card.position.z);
+          p.setXYZ(1, lbl.position.x, lbl.position.y - half, lbl.position.z);
+          p.needsUpdate = true;
+        }
+      }
     } else if (u.state === "flying" && u.flight) {
       const f = u.flight;
       const dt = Math.min(0.05, Math.max(0, (now - f.last) / 1000));
@@ -708,7 +991,8 @@ function updateCards(now) {
         f.vel.multiplyScalar(Math.exp(-3.0 * dt));
         f.vel.y += GRAVITY * 0.3 * dt;
         f.pos.addScaledVector(f.vel, dt);
-        if (f.dead || f.t > 20) {              // real failure (after retries)
+        if (f.dead || f.t > 20) {
+          // real failure (after retries)
           card.userData.flight = null;
           placeOnTray(card);
           done = true;
@@ -820,7 +1104,7 @@ function _yearColor(year) {
   const y = parseInt(year, 10);
   if (!yr || !Number.isFinite(y)) return "#888";
   const t = (y - yr[0]) / Math.max(1, yr[1] - yr[0]);
-  return viridis(t).getStyle();                     // same ramp as the point cloud
+  return viridis(t).getStyle(); // same ramp as the point cloud
 }
 
 function buildLegend() {
@@ -833,8 +1117,9 @@ function buildLegend() {
   const yr = pick.yearRange;
   if (yr) {
     document.getElementById("legend-min").textContent = yr[0];
-    document.getElementById("legend-mid").textContent =
-      Math.round((yr[0] + yr[1]) / 2);
+    document.getElementById("legend-mid").textContent = Math.round(
+      (yr[0] + yr[1]) / 2,
+    );
     document.getElementById("legend-max").textContent = yr[1];
   }
 }
@@ -846,19 +1131,21 @@ function renderPredictions() {
       '<li class="muted">none yet — throw an image at the graph</li>';
     return;
   }
-  ul.replaceChildren(...predictions.map((p) => {
-    const li = document.createElement("li");
-    const sw = document.createElement("span");
-    sw.className = "sw";
-    sw.style.background = _yearColor(p.year);
-    const nm = document.createElement("span");
-    nm.textContent = p.name;
-    const yr = document.createElement("span");
-    yr.className = "yr";
-    yr.textContent = `~${p.year}`;
-    li.append(sw, nm, yr);
-    return li;
-  }));
+  ul.replaceChildren(
+    ...predictions.map((p) => {
+      const li = document.createElement("li");
+      const sw = document.createElement("span");
+      sw.className = "sw";
+      sw.style.background = _yearColor(p.year);
+      const nm = document.createElement("span");
+      nm.textContent = p.name;
+      const yr = document.createElement("span");
+      yr.className = "yr";
+      yr.textContent = `~${p.year}`;
+      li.append(sw, nm, yr);
+      return li;
+    }),
+  );
 }
 
 document.getElementById("legend-btn").addEventListener("click", () => {
@@ -866,11 +1153,40 @@ document.getElementById("legend-btn").addEventListener("click", () => {
   el.hidden = !el.hidden;
 });
 
+// "📱 Phone cam": reveal the /phone URL + a QR to scan. QR lib is imported lazily
+// (only when first opened) so it never affects initial load; if it fails the URL
+// text alone is enough to type in.
+document.getElementById("phone-btn").addEventListener("click", async () => {
+  const panel = document.getElementById("phone-panel");
+  panel.hidden = !panel.hidden;
+  if (panel.hidden) return;
+  const url = location.origin + "/phone";
+  document.getElementById("phone-url").textContent = url;
+  if (panel.dataset.qr) return; // already rendered
+  try {
+    const { default: QRCode } =
+      await import("https://cdn.jsdelivr.net/npm/qrcode@1.5.3/+esm");
+    await QRCode.toCanvas(document.getElementById("phone-qr"), url, {
+      width: 180,
+      margin: 1,
+    });
+    panel.dataset.qr = "1";
+  } catch {
+    document.getElementById("phone-qr").hidden = true; // fall back to URL text
+  }
+});
+
 // ── VR controllers: grab to move/rotate, right thumbstick to scale ──────────────
 let grabbedBy = null;
+const controllers = [];
 for (const i of [0, 1]) {
   const c = renderer.xr.getController(i);
+  c.userData.connected = false;
+  c.addEventListener("connected", () => (c.userData.connected = true));
+  c.addEventListener("disconnected", () => (c.userData.connected = false));
+  controllers.push(c);
   c.addEventListener("selectstart", () => {
+    if (twoHandScaling) return; // mid two-handed zoom — don't grab
     const card = pickCardForController(c); // card grab takes priority
     if (card && card.userData.state === "tray") {
       card.userData.state = "grabbed";
@@ -904,6 +1220,83 @@ for (const i of [0, 1]) {
     ),
   );
   scene.add(c);
+}
+
+// ── Hand tracking: two-handed pinch to zoom the model ───────────────────────────
+// Each hand's pinch is detected from the thumb-tip↔index-tip joint distance (with
+// hysteresis to avoid flicker). When BOTH hands pinch, the live distance between
+// the two pinch points drives world.scale relative to where the gesture started —
+// spread hands apart to zoom in, bring them together to zoom out. This is the
+// hand-tracking analogue of the right thumbstick scale (applyThumbstickScale).
+// No visible hand model — we only need the tracked joint poses for pinch
+// detection. The hands are still added to the scene so their joint world
+// matrices update each frame; nothing is rendered for them (in AR you see your
+// real hands through passthrough anyway).
+const hands = [];
+for (const i of [0, 1]) {
+  const h = renderer.xr.getHand(i);
+  scene.add(h);
+  hands.push(h);
+}
+
+const PINCH_ON = 0.022; // m, thumb↔index gap to start a pinch
+const PINCH_OFF = 0.04; // m, gap to release it (hysteresis)
+const _pinchOn = [false, false];
+const _ji = new THREE.Vector3();
+const _jt = new THREE.Vector3();
+
+// True while hand `i` is pinching; writes the pinch midpoint to `outMid`.
+function pinchInfo(hand, i, outMid) {
+  const tip = hand.joints?.["index-finger-tip"];
+  const thumb = hand.joints?.["thumb-tip"];
+  if (!tip || !thumb || !tip.visible || !thumb.visible) {
+    _pinchOn[i] = false;
+    return false;
+  }
+  tip.getWorldPosition(_ji);
+  thumb.getWorldPosition(_jt);
+  const d = _ji.distanceTo(_jt);
+  if (_pinchOn[i]) {
+    if (d > PINCH_OFF) _pinchOn[i] = false;
+  } else if (d < PINCH_ON) {
+    _pinchOn[i] = true;
+  }
+  if (_pinchOn[i]) outMid.copy(_ji).add(_jt).multiplyScalar(0.5);
+  return _pinchOn[i];
+}
+
+const _ptL = new THREE.Vector3();
+const _ptR = new THREE.Vector3();
+const _scaleGesture = { active: false, startDist: 0, startScale: 1 };
+// Set while a two-handed scale is in progress so the pinch's select events don't
+// also grab/move the model (see the selectstart handler).
+let twoHandScaling = false;
+
+function applyHandPinchScale() {
+  if (!renderer.xr.getSession()) return;
+  const p0 = pinchInfo(hands[0], 0, _ptL);
+  const p1 = pinchInfo(hands[1], 1, _ptR);
+  if (p0 && p1) {
+    const dist = _ptL.distanceTo(_ptR);
+    if (!_scaleGesture.active) {
+      _scaleGesture.active = true;
+      _scaleGesture.startDist = dist;
+      _scaleGesture.startScale = world.scale.x;
+      twoHandScaling = true;
+      if (grabbedBy) {
+        // a pinch may have already grabbed the model — hand it back to the scene
+        // so scaling doesn't fight a controller-attached translate.
+        grabbedBy = null;
+        scene.attach(world);
+      }
+    } else if (_scaleGesture.startDist > 1e-4) {
+      const s = _scaleGesture.startScale * (dist / _scaleGesture.startDist);
+      world.scale.setScalar(THREE.MathUtils.clamp(s, 0.2, 6));
+    }
+  } else if (_scaleGesture.active) {
+    _scaleGesture.active = false;
+    twoHandScaling = false;
+  }
 }
 
 // ── Point-at-to-inspect + grip-to-pin ───────────────────────────────────────────
@@ -1033,6 +1426,88 @@ function pinHover(ci) {
   pinIndex(HOVER[ci].index);
 }
 
+// ── Pre-grab card highlight ──────────────────────────────────────────────────────
+// Hand tracking shows no laser line, so there's no cue for when your hand has
+// actually reached a tray card and a pinch would grab it. Each frame we run the
+// SAME pick the grab uses (pickCardForController) for both inputs and light up
+// whichever card is currently grabbable — amber outline + a slight pop — so
+// "about to grab" is visible before you commit. State is re-applied from the live
+// pick set, so it survives the async frame rebuilds in _buildFrame.
+const HOVER_TINT = 0xffd24a;
+const HOVER_SCALE = 1.06;
+
+function setCardHover(card, on) {
+  card.userData.hovered = on;
+  card.scale.setScalar(on ? HOVER_SCALE : 1);
+  for (const c of card.userData.frame.children) {
+    if (!c.isLineLoop) continue; // the white outline; skip the glow plane
+    c.material.color.setHex(on ? HOVER_TINT : 0xffffff);
+    c.material.opacity = on ? 1 : 0.95;
+  }
+}
+
+const _grabHoverSet = new Set();
+function updateGrabHover() {
+  _grabHoverSet.clear();
+  if (!twoHandScaling) {
+    for (const ci of [0, 1]) {
+      const card = pickCardForController(renderer.xr.getController(ci));
+      if (card) _grabHoverSet.add(card);
+    }
+  }
+  for (const card of photoCards) {
+    const want = card.userData.state === "tray" && _grabHoverSet.has(card);
+    if (want !== !!card.userData.hovered) setCardHover(card, want);
+  }
+}
+
+function clearGrabHover() {
+  for (const card of photoCards) {
+    if (card.userData.hovered) setCardHover(card, false);
+  }
+}
+
+// ── Parked-card hover: pop the pointed-at timeline image to the front ─────────────
+// Parked images crowd together near the same year and can occlude/clip each other.
+// While pointed at, a card grows a little (PARK_HOVER_SCALE, applied in updateCards'
+// parked branch) and renders on top of the rest: depthTest off + a high renderOrder
+// so it always draws last and never clips behind a neighbour.
+function setParkedHover(card, on) {
+  if (!!card.userData.parkedHover === on) return;
+  card.userData.parkedHover = on;
+  const photo = card.userData.photo;
+  photo.material.depthTest = !on;
+  photo.renderOrder = on ? 20 : 0;
+  for (const c of card.userData.frame.children) {
+    c.material.depthTest = !on;
+    c.renderOrder = on ? 20 : 0;
+  }
+}
+
+const _parkHits = [];
+function updateParkedHover(raycasters) {
+  const parked = photoCards.filter(
+    (c) => c.userData.state === "parked" && c.visible,
+  );
+  let hovered = null,
+    bestDist = Infinity;
+  for (const rc of raycasters) {
+    _parkHits.length = 0;
+    rc.intersectObjects(parked, true, _parkHits);
+    if (_parkHits.length && _parkHits[0].distance < bestDist) {
+      bestDist = _parkHits[0].distance;
+      hovered = _cardOf(_parkHits[0].object);
+    }
+  }
+  for (const card of parked) setParkedHover(card, card === hovered);
+}
+
+function clearParkedHover() {
+  for (const card of photoCards) {
+    if (card.userData.parkedHover) setParkedHover(card, false);
+  }
+}
+
 // Desktop fallback (no XR controllers): mouse points, "p" pins. Same resolve
 // path as VR so the whole feature is testable without a headset.
 const _deskRay = new THREE.Raycaster();
@@ -1100,9 +1575,12 @@ renderer.setAnimationLoop(() => {
   const now = performance.now();
   if (renderer.xr.isPresenting) {
     applyThumbstickScale();
+    applyHandPinchScale();
     pollCaptureButton();
     updateHover(0);
     updateHover(1);
+    updateGrabHover();
+    updateParkedHover(_xrRaycasters); // rays set by updateHover above
     hideHover(_deskHover); // drop the desktop highlight on entering VR
   } else {
     world.rotation.y += 0.0015; // gentle auto-spin on desktop
@@ -1110,6 +1588,9 @@ renderer.setAnimationLoop(() => {
     hideHover(HOVER[0]);
     hideHover(HOVER[1]);
     updateDesktopHover();
+    clearGrabHover(); // no controller-reach grab on desktop
+    if (_mouseInside) updateParkedHover([_deskRay]); // ray set by updateDesktopHover
+    else clearParkedHover();
   }
   updateCards(now);
   renderer.render(scene, camera);
@@ -1121,6 +1602,89 @@ loadTimeline().catch((e) =>
     true,
   ),
 );
+
+// ── Phone-shared photos: appear and auto-throw the instant they're sent ─────────
+// A phone at /phone POSTs a snapshot to /api/share; the server pushes it down this
+// SSE stream. We spawn the same kind of card as an upload but keep it hidden until
+// its texture has loaded — then reveal it and throw it from a hand so it flies out
+// of the viewer's grasp into the timeline and predicts with no manual toss.
+
+// Writes a tracked hand/controller world position to `out`, preferring a visible
+// hand wrist, then a connected controller. Returns false if neither is available
+// (desktop, or hands/controllers not yet tracked) so the caller can fall back to a
+// viewer-relative toss.
+const _spawnPos = new THREE.Vector3();
+const _spawnDir = new THREE.Vector3();
+function handSpawnPoint(out) {
+  for (const h of hands) {
+    const joint = h.joints?.["wrist"] || h.joints?.["index-finger-tip"];
+    if (joint && joint.visible) {
+      joint.getWorldPosition(out);
+      return true;
+    }
+  }
+  for (const c of controllers) {
+    if (c.userData.connected) {
+      c.getWorldPosition(out);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Throw a card outward from a hand/controller (away from the head). Falls back to
+// throwCard's viewer-relative toss when no hand pose is available (e.g. desktop).
+function launchFromHand(card) {
+  if (!handSpawnPoint(_spawnPos)) {
+    throwCard(card);
+    return;
+  }
+  card.position.copy(_spawnPos); // card is a child of `scene`
+  viewerPose(_vwPos, _vwQuat);
+  _spawnDir.copy(_spawnPos).sub(_vwPos); // head → hand = outward
+  _spawnDir.y = 0;
+  if (_spawnDir.lengthSq() < 1e-6) {
+    _spawnDir.set(0, 0, -1).applyQuaternion(_vwQuat); // hand under the head: forward
+  }
+  _spawnDir.normalize().multiplyScalar(2.4);
+  _spawnDir.y += 0.6; // slight upward lob, matching the desktop toss
+  throwCard(card, _spawnDir, new THREE.Vector3(1, 0, 0), 4);
+}
+
+function receiveSharedImage(url, name) {
+  showNotice("📷 Received", false, 1500);
+  const card = spawnExampleCard(url, name || "photo", () => {
+    card.visible = true; // reveal only once the texture is in
+    launchFromHand(card);
+  });
+  card.visible = false; // hide the gray placeholder until then
+}
+
+const _seenShareIds = new Set();
+function connectShareStream() {
+  let es;
+  try {
+    es = new EventSource("/api/share/stream");
+  } catch {
+    return; // no EventSource support → phone sharing simply unavailable
+  }
+  es.onmessage = (e) => {
+    let d;
+    try {
+      d = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    // Dedup by id: the server replays the last event on (re)connect, and
+    // EventSource reconnects on transient drops — so the same photo can arrive
+    // more than once. Only throw it the first time we see it.
+    if (!d || !d.url || _seenShareIds.has(d.id)) return;
+    _seenShareIds.add(d.id);
+    receiveSharedImage(d.url, d.name);
+  };
+  // EventSource auto-reconnects on transient drops; nothing to handle here.
+}
+connectShareStream();
 
 // Bundled demo images → a grabbable shelf, so there is something to throw
 // without picking a file (re-seated in front of you on entering the headset).
