@@ -1,14 +1,14 @@
-# Reproduction Guide — Timeline-VLM WebXR
-
-This document gives step-by-step instructions to reproduce the system demonstrated
-in our research demo, an immersive **WebXR** visualization of the temporal manifold
-from *Can Vision-Language Models Tell When Things Were Made?*
-([arXiv:2510.19559](https://arxiv.org/pdf/2510.19559)).
+# Timeline-VLM WebXR
 
 The demo (a) renders precomputed CLIP timeline embeddings (years **1700–2024**) as a
 3-D point cloud threaded by a learned Bézier *time-axis*, explorable in VR or by
 desktop orbit, and (b) estimates the year of an uploaded image by projecting its CLIP
 embedding onto that same axis.
+
+![description](demo.gif)
+
+
+
 
 Everything needed to reproduce the demo is contained in this repository; no training
 is required, as the timeline embeddings are precomputed and version-controlled.
@@ -25,9 +25,6 @@ is required, as the timeline embeddings are precomputed and version-controlled.
 | Demo images | Bundled example images for the in-headset shelf | `examples/` |
 | Encoder | CLIP ViT-B/32 (`openai/clip-vit-base-patch32`), downloaded on first run | (HF Hub) |
 
-The server is intentionally standalone: it does **not** import the upstream Gradio
-app (`github.com/TekayaNidham/timeline-vlm`). The ~30 lines of pipeline math are
-re-derived in `server.py` and kept in sync with the upstream app by hand.
 
 ---
 
@@ -101,7 +98,7 @@ python server.py                    # serves on http://0.0.0.0:7860
 Open **http://localhost:7860** — desktop works immediately: drag to orbit, scroll to
 zoom, toggle raw embeddings, and upload an image to estimate its year.
 
-On startup the server warms the default `clip` scene and prints `Timeline scene
+On startup the server the default `clip` scene and prints `Timeline scene
 ready.` (`server.py:359`). If the embeddings are still LFS pointers it instead prints
 a `WARNING:` line telling you to run `git lfs pull`.
 
@@ -114,7 +111,7 @@ a `WARNING:` line telling you to run `git lfs pull`.
 
 ---
 
-## 5. Via Docker (recommended for a clean environment)
+## 5. Docker
 
 The image installs `git-lfs`, resolves LFS blobs at build, and pre-downloads CLIP so
 the first request is instant and runtime needs no Hugging Face access.
@@ -137,7 +134,6 @@ Notes for reviewers building the image:
 - `docker-compose.yml` runs the container behind a Traefik reverse proxy with
   automatic Let's Encrypt TLS (used for the public headset-accessible deployment).
   It expects an external `proxy` network and is **not** needed to reproduce results.
-- `docker-compose.override.yml` is a **local-dev** override: it bind-mounts `webxr/`
   and publishes port 7860 directly (no Traefik). `docker compose up` auto-merges it;
   to reproduce the production setup, run `docker compose -f docker-compose.yml up`.
 
