@@ -476,6 +476,7 @@ const FRAME_RADIUS = CARD_RADIUS + FRAME_GAP; // concentric rounding for the fra
 const PARK_REF_DIST = 2.0; // m at which a parked card is shown at its native size
 const PARK_MIN_SCALE = 0.7; // clamp so close-up cards don't shrink to nothing
 const PARK_MAX_SCALE = 4.0; // …and far-away ones don't balloon
+const PARK_HOVER_SCALE = 1.25; // pop a hovered parked card slightly larger
 
 // Soft bloom texture: a white rectangle stroke with a heavy canvas blur, sized so
 // the stroke lands where the crisp outline is (FRAME_GLOW in from each edge) and
@@ -649,7 +650,7 @@ function placeOnTray(card) {
 
 let _cardSlot = 0;
 
-function _applyCardTexture(card, photo, frame, texUrl, revoke) {
+function _applyCardTexture(card, photo, frame, texUrl, revoke, onReady) {
   _texLoader.load(
     texUrl,
     (t) => {
@@ -670,6 +671,7 @@ function _applyCardTexture(card, photo, frame, texUrl, revoke) {
       photo.material.alphaMap = _roundedMask(w, h);
       photo.material.needsUpdate = true;
       _buildFrame(frame, w, h);
+      if (onReady) onReady();
     },
     undefined,
     () => {
@@ -722,9 +724,9 @@ function spawnPhotoCard(file) {
   return card;
 }
 
-function spawnExampleCard(url, name) {
+function spawnExampleCard(url, name, onReady) {
   const { card, photo, frame } = _makeCard({ kind: "url", url, name });
-  _applyCardTexture(card, photo, frame, url, false);
+  _applyCardTexture(card, photo, frame, url, false, onReady);
   return card;
 }
 
@@ -945,11 +947,12 @@ function updateCards(now) {
       card.getWorldPosition(_scratchB);
       const wscale = world.scale.x || 1;
       const dist = _scratchA.distanceTo(_scratchB);
-      const f = THREE.MathUtils.clamp(
+      let f = THREE.MathUtils.clamp(
         dist / (PARK_REF_DIST * wscale),
         PARK_MIN_SCALE,
         PARK_MAX_SCALE,
       );
+      if (u.parkedHover) f *= PARK_HOVER_SCALE; // pop when pointed at
       card.scale.setScalar(f);
       card.lookAt(_scratchA); // billboard: always face the viewer
       // Float the year label just above the (scaled) card and tie it back with the
@@ -1175,8 +1178,13 @@ document.getElementById("phone-btn").addEventListener("click", async () => {
 
 // ── VR controllers: grab to move/rotate, right thumbstick to scale ──────────────
 let grabbedBy = null;
+const controllers = [];
 for (const i of [0, 1]) {
   const c = renderer.xr.getController(i);
+  c.userData.connected = false;
+  c.addEventListener("connected", () => (c.userData.connected = true));
+  c.addEventListener("disconnected", () => (c.userData.connected = false));
+  controllers.push(c);
   c.addEventListener("selectstart", () => {
     if (twoHandScaling) return; // mid two-handed zoom — don't grab
     const card = pickCardForController(c); // card grab takes priority
@@ -1459,6 +1467,47 @@ function clearGrabHover() {
   }
 }
 
+// ── Parked-card hover: pop the pointed-at timeline image to the front ─────────────
+// Parked images crowd together near the same year and can occlude/clip each other.
+// While pointed at, a card grows a little (PARK_HOVER_SCALE, applied in updateCards'
+// parked branch) and renders on top of the rest: depthTest off + a high renderOrder
+// so it always draws last and never clips behind a neighbour.
+function setParkedHover(card, on) {
+  if (!!card.userData.parkedHover === on) return;
+  card.userData.parkedHover = on;
+  const photo = card.userData.photo;
+  photo.material.depthTest = !on;
+  photo.renderOrder = on ? 20 : 0;
+  for (const c of card.userData.frame.children) {
+    c.material.depthTest = !on;
+    c.renderOrder = on ? 20 : 0;
+  }
+}
+
+const _parkHits = [];
+function updateParkedHover(raycasters) {
+  const parked = photoCards.filter(
+    (c) => c.userData.state === "parked" && c.visible,
+  );
+  let hovered = null,
+    bestDist = Infinity;
+  for (const rc of raycasters) {
+    _parkHits.length = 0;
+    rc.intersectObjects(parked, true, _parkHits);
+    if (_parkHits.length && _parkHits[0].distance < bestDist) {
+      bestDist = _parkHits[0].distance;
+      hovered = _cardOf(_parkHits[0].object);
+    }
+  }
+  for (const card of parked) setParkedHover(card, card === hovered);
+}
+
+function clearParkedHover() {
+  for (const card of photoCards) {
+    if (card.userData.parkedHover) setParkedHover(card, false);
+  }
+}
+
 // Desktop fallback (no XR controllers): mouse points, "p" pins. Same resolve
 // path as VR so the whole feature is testable without a headset.
 const _deskRay = new THREE.Raycaster();
@@ -1531,6 +1580,7 @@ renderer.setAnimationLoop(() => {
     updateHover(0);
     updateHover(1);
     updateGrabHover();
+    updateParkedHover(_xrRaycasters); // rays set by updateHover above
     hideHover(_deskHover); // drop the desktop highlight on entering VR
   } else {
     world.rotation.y += 0.0015; // gentle auto-spin on desktop
@@ -1539,6 +1589,8 @@ renderer.setAnimationLoop(() => {
     hideHover(HOVER[1]);
     updateDesktopHover();
     clearGrabHover(); // no controller-reach grab on desktop
+    if (_mouseInside) updateParkedHover([_deskRay]); // ray set by updateDesktopHover
+    else clearParkedHover();
   }
   updateCards(now);
   renderer.render(scene, camera);
@@ -1553,12 +1605,59 @@ loadTimeline().catch((e) =>
 
 // ── Phone-shared photos: appear and auto-throw the instant they're sent ─────────
 // A phone at /phone POSTs a snapshot to /api/share; the server pushes it down this
-// SSE stream. We spawn the same kind of card as an upload, then immediately throw
-// it so it flies into the timeline and predicts with no manual toss.
+// SSE stream. We spawn the same kind of card as an upload but keep it hidden until
+// its texture has loaded — then reveal it and throw it from a hand so it flies out
+// of the viewer's grasp into the timeline and predicts with no manual toss.
+
+// Writes a tracked hand/controller world position to `out`, preferring a visible
+// hand wrist, then a connected controller. Returns false if neither is available
+// (desktop, or hands/controllers not yet tracked) so the caller can fall back to a
+// viewer-relative toss.
+const _spawnPos = new THREE.Vector3();
+const _spawnDir = new THREE.Vector3();
+function handSpawnPoint(out) {
+  for (const h of hands) {
+    const joint = h.joints?.["wrist"] || h.joints?.["index-finger-tip"];
+    if (joint && joint.visible) {
+      joint.getWorldPosition(out);
+      return true;
+    }
+  }
+  for (const c of controllers) {
+    if (c.userData.connected) {
+      c.getWorldPosition(out);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Throw a card outward from a hand/controller (away from the head). Falls back to
+// throwCard's viewer-relative toss when no hand pose is available (e.g. desktop).
+function launchFromHand(card) {
+  if (!handSpawnPoint(_spawnPos)) {
+    throwCard(card);
+    return;
+  }
+  card.position.copy(_spawnPos); // card is a child of `scene`
+  viewerPose(_vwPos, _vwQuat);
+  _spawnDir.copy(_spawnPos).sub(_vwPos); // head → hand = outward
+  _spawnDir.y = 0;
+  if (_spawnDir.lengthSq() < 1e-6) {
+    _spawnDir.set(0, 0, -1).applyQuaternion(_vwQuat); // hand under the head: forward
+  }
+  _spawnDir.normalize().multiplyScalar(2.4);
+  _spawnDir.y += 0.6; // slight upward lob, matching the desktop toss
+  throwCard(card, _spawnDir, new THREE.Vector3(1, 0, 0), 4);
+}
+
 function receiveSharedImage(url, name) {
-  const card = spawnExampleCard(url, name || "photo");
-  throwCard(card);
   showNotice("📷 Received", false, 1500);
+  const card = spawnExampleCard(url, name || "photo", () => {
+    card.visible = true; // reveal only once the texture is in
+    launchFromHand(card);
+  });
+  card.visible = false; // hide the gray placeholder until then
 }
 
 const _seenShareIds = new Set();
