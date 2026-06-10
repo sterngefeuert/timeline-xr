@@ -4,6 +4,13 @@ transformers==4.47.0
 Pillow
 scikit-learn
 numpy
+
+# WebXR backend (server.py)
 fastapi
 uvicorn[standard]
 python-multipart
+
+# Gradio web demo (app.py)
+gradio
+plotly
+matplotlib
