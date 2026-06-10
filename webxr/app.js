@@ -472,6 +472,12 @@ const FRAME_GLOW = 0.06; // m, how far the soft bloom extends beyond the outline
 const CARD_RADIUS = 0.001; // m, rounded-corner radius of the photo itself
 const FRAME_RADIUS = CARD_RADIUS + FRAME_GAP; // concentric rounding for the frame
 
+// Parked-prediction presentation (see the "parked" branch in updateCards):
+const PARK_SPIN = 0.0005; // rad/ms turntable spin (~one turn per 12.5 s)
+const PARK_REF_DIST = 2.0; // m at which a parked card is shown at its native size
+const PARK_MIN_SCALE = 0.7; // clamp so close-up cards don't shrink to nothing
+const PARK_MAX_SCALE = 4.0; // …and far-away ones don't balloon
+
 // Soft bloom texture: a white rectangle stroke with a heavy canvas blur, sized so
 // the stroke lands where the crisp outline is (FRAME_GLOW in from each edge) and
 // the blur radiates outward. Used on an additive plane behind the outline — a
@@ -873,10 +879,26 @@ function parkCard(card) {
   viewerPose(_scratchA, _scratchQ);
   card.lookAt(_scratchA);
   const lbl = makeLabel(`~${d.year}`, "#ffffff", 0.13);
+  lbl.userData.baseScale = lbl.scale.clone(); // distance-scaling is relative to this
   lbl.position.set(...d.position);
-  lbl.position.y += 0.08;
   userGroup.add(lbl);
   card.userData.label = lbl;
+  // A thin stem keeps the floating year tied to its (spinning) image — placed and
+  // sized every frame in updateCards' parked branch.
+  const stem = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(),
+      new THREE.Vector3(),
+    ]),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+    }),
+  );
+  userGroup.add(stem);
+  card.userData.stem = stem;
   card.userData.state = "parked";
   card.userData.flight = null;
   showNotice(`~${d.year}`, false, 1800);
@@ -913,12 +935,44 @@ function updateCards(now) {
       viewerPose(_scratchA, _scratchQ);
       card.lookAt(_scratchA);
     } else if (u.state === "parked") {
-      // Billboard the parked card at the viewer every frame (like the year-label
-      // sprites) so it tracks you as you orbit/move, instead of facing only the
-      // pose it had when it landed. lookAt works in world space and accounts for
-      // userGroup/world's transform, so the timeline anchor is unaffected.
-      viewerPose(_scratchA, _scratchQ);
-      card.lookAt(_scratchA);
+      // Parked predictions stay anchored at their year on the timeline. Two cues
+      // keep them legible from anywhere in the room:
+      //  (1) a slow turntable spin so they're always in motion and catch the eye;
+      //  (2) distance-compensated size — bigger the further the viewer is — so the
+      //      image holds a readable apparent size across the room. We divide by the
+      //      world scale so the zoom and the distance-grow don't compound.
+      viewerPose(_scratchA, _scratchQ); // _scratchA = viewer world position
+      card.getWorldPosition(_scratchB);
+      const wscale = world.scale.x || 1;
+      const dist = _scratchA.distanceTo(_scratchB);
+      const f = THREE.MathUtils.clamp(
+        dist / (PARK_REF_DIST * wscale),
+        PARK_MIN_SCALE,
+        PARK_MAX_SCALE,
+      );
+      card.scale.setScalar(f);
+      card.rotation.set(0, now * PARK_SPIN, 0);
+      // Float the year label just above the (scaled) card and tie it back with the
+      // stem, so "~2024" never overlaps the image but stays connected to it. The
+      // label sprite already billboards; we only scale + reposition it.
+      const lbl = u.label;
+      if (lbl) {
+        const ph = u.photo.geometry.parameters.height || CARD_MAX;
+        const top = (ph / 2) * f + FRAME_GAP + 0.05; // card top edge + a margin
+        lbl.scale.copy(lbl.userData.baseScale).multiplyScalar(f);
+        const half = lbl.scale.y / 2;
+        lbl.position.set(
+          card.position.x,
+          card.position.y + top + half,
+          card.position.z,
+        );
+        if (u.stem) {
+          const p = u.stem.geometry.attributes.position;
+          p.setXYZ(0, card.position.x, card.position.y + top, card.position.z);
+          p.setXYZ(1, lbl.position.x, lbl.position.y - half, lbl.position.z);
+          p.needsUpdate = true;
+        }
+      }
     } else if (u.state === "flying" && u.flight) {
       const f = u.flight;
       const dt = Math.min(0.05, Math.max(0, (now - f.last) / 1000));
@@ -1364,6 +1418,47 @@ function pinHover(ci) {
   pinIndex(HOVER[ci].index);
 }
 
+// ── Pre-grab card highlight ──────────────────────────────────────────────────────
+// Hand tracking shows no laser line, so there's no cue for when your hand has
+// actually reached a tray card and a pinch would grab it. Each frame we run the
+// SAME pick the grab uses (pickCardForController) for both inputs and light up
+// whichever card is currently grabbable — amber outline + a slight pop — so
+// "about to grab" is visible before you commit. State is re-applied from the live
+// pick set, so it survives the async frame rebuilds in _buildFrame.
+const HOVER_TINT = 0xffd24a;
+const HOVER_SCALE = 1.06;
+
+function setCardHover(card, on) {
+  card.userData.hovered = on;
+  card.scale.setScalar(on ? HOVER_SCALE : 1);
+  for (const c of card.userData.frame.children) {
+    if (!c.isLineLoop) continue; // the white outline; skip the glow plane
+    c.material.color.setHex(on ? HOVER_TINT : 0xffffff);
+    c.material.opacity = on ? 1 : 0.95;
+  }
+}
+
+const _grabHoverSet = new Set();
+function updateGrabHover() {
+  _grabHoverSet.clear();
+  if (!twoHandScaling) {
+    for (const ci of [0, 1]) {
+      const card = pickCardForController(renderer.xr.getController(ci));
+      if (card) _grabHoverSet.add(card);
+    }
+  }
+  for (const card of photoCards) {
+    const want = card.userData.state === "tray" && _grabHoverSet.has(card);
+    if (want !== !!card.userData.hovered) setCardHover(card, want);
+  }
+}
+
+function clearGrabHover() {
+  for (const card of photoCards) {
+    if (card.userData.hovered) setCardHover(card, false);
+  }
+}
+
 // Desktop fallback (no XR controllers): mouse points, "p" pins. Same resolve
 // path as VR so the whole feature is testable without a headset.
 const _deskRay = new THREE.Raycaster();
@@ -1435,6 +1530,7 @@ renderer.setAnimationLoop(() => {
     pollCaptureButton();
     updateHover(0);
     updateHover(1);
+    updateGrabHover();
     hideHover(_deskHover); // drop the desktop highlight on entering VR
   } else {
     world.rotation.y += 0.0015; // gentle auto-spin on desktop
@@ -1442,6 +1538,7 @@ renderer.setAnimationLoop(() => {
     hideHover(HOVER[0]);
     hideHover(HOVER[1]);
     updateDesktopHover();
+    clearGrabHover(); // no controller-reach grab on desktop
   }
   updateCards(now);
   renderer.render(scene, camera);
