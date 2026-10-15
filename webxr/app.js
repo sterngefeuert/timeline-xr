@@ -907,6 +907,115 @@ function parkCard(card) {
   renderPredictions();
 }
 
+// ── Reset: send every thrown card back to the tray so it can be thrown again ────
+// Only touches the image cards (and the prediction list) — the manifold, its
+// pose/scale and any grip-pinned points stay as they are. A card still held in a
+// hand is left alone; an in-flight card's pending prediction is dropped because
+// throwCard ignores a result whose flight was superseded.
+function resetCards() {
+  for (const card of photoCards) {
+    const u = card.userData;
+    if (u.state === "grabbed") continue;
+    if (u.label) {
+      u.label.removeFromParent();
+      u.label.material.map.dispose(); // Sprite geometry is shared — don't dispose
+      u.label.material.dispose();
+    }
+    if (u.stem) {
+      u.stem.removeFromParent();
+      u.stem.geometry.dispose();
+      u.stem.material.dispose();
+    }
+    u.label = null;
+    u.stem = null;
+    u.flight = null;
+    setParkedHover(card, false);
+    scene.attach(card); // out of userGroup, back to a plain scene child
+    card.scale.setScalar(1);
+    placeOnTray(card);
+  }
+  predictions.length = 0;
+  renderPredictions();
+  _placeResetButton();
+  showNotice("Reset — throw the images again.", false, 2500);
+}
+
+// In-headset reset button: a small panel seated just below the tray, facing the
+// viewer. Pointing a controller (or pinching a hand) at it triggers resetCards;
+// see the selectstart handler. Only shown while presenting.
+const RESET_W = 0.2,
+  RESET_H = 0.07;
+const _RESET_OFFSET = new THREE.Vector3(0, -0.55, 0); // below the tray row
+function _makeResetButton() {
+  const cv = document.createElement("canvas");
+  cv.width = 400;
+  cv.height = 140;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "rgba(28,34,56,0.92)";
+  _roundRectPath(ctx, 4, 4, cv.width - 8, cv.height - 8, 40);
+  ctx.fill();
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = "#ffffff";
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 64px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("↺ Reset", cv.width / 2, cv.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const btn = new THREE.Mesh(
+    new THREE.PlaneGeometry(RESET_W, RESET_H),
+    new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      side: THREE.DoubleSide,
+    }),
+  );
+  btn.visible = false;
+  scene.add(btn);
+  return btn;
+}
+const resetButton = _makeResetButton();
+
+function _placeResetButton() {
+  viewerPose(_scratchA, _scratchQ);
+  const fwd = _scratchB.set(0, 0, -1).applyQuaternion(_scratchQ);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+  resetButton.position
+    .copy(_scratchA)
+    .addScaledVector(fwd, 0.6)
+    .add(_RESET_OFFSET);
+}
+
+// Is controller/hand `c` pointing at (or within reach of) the reset button?
+function resetButtonPicked(c) {
+  if (!resetButton.visible) return false;
+  c.updateWorldMatrix(true, false);
+  _scratchQ.setFromRotationMatrix(c.matrixWorld);
+  _cardRaycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  _cardRaycaster.ray.direction
+    .set(0, 0, -1)
+    .applyQuaternion(_scratchQ)
+    .normalize();
+  if (_cardRaycaster.intersectObject(resetButton, false).length) return true;
+  c.getWorldPosition(_scratchA);
+  return resetButton.position.distanceToSquared(_scratchA) < 0.12 * 0.12;
+}
+
+function updateResetButton() {
+  resetButton.visible = renderer.xr.isPresenting;
+  if (!resetButton.visible) return;
+  viewerPose(_scratchA, _scratchQ);
+  resetButton.lookAt(_scratchA);
+  let hot = false;
+  for (const c of controllers) if (resetButtonPicked(c)) hot = true;
+  resetButton.material.color.setHex(hot ? HOVER_TINT : 0xffffff);
+  resetButton.scale.setScalar(hot ? HOVER_SCALE : 1);
+}
+
 // Per-frame: sample grabbed cards' velocity, face tray cards at the viewer,
 // advance the flight arc, and keep the notice in front of the viewer.
 function updateCards(now) {
@@ -915,6 +1024,7 @@ function updateCards(now) {
     for (const c of photoCards) {
       if (c.userData.state === "tray") placeOnTray(c);
     }
+    _placeResetButton();
   }
   for (const card of photoCards) {
     const u = card.userData;
@@ -1055,6 +1165,19 @@ function updateCards(now) {
   }
 }
 
+// Reset shortcut on either controller's B / Y face button (buttons[5]).
+const _resetBtnPrev = new WeakMap();
+function pollResetButton() {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  for (const src of session.inputSources) {
+    const btn = src.gamepad?.buttons[5];
+    if (!btn || src.hand) continue;
+    if (btn.pressed && !_resetBtnPrev.get(src)) resetCards();
+    _resetBtnPrev.set(src, btn.pressed);
+  }
+}
+
 // Capture button (left X / buttons[4]). WebXR Raw Camera Access is gated behind
 // `camera-access`; absent on Quest today, so this only explains the limitation.
 const _btnPrev = new WeakMap();
@@ -1148,6 +1271,8 @@ function renderPredictions() {
   );
 }
 
+document.getElementById("reset-btn").addEventListener("click", resetCards);
+
 document.getElementById("legend-btn").addEventListener("click", () => {
   const el = document.getElementById("legend");
   el.hidden = !el.hidden;
@@ -1187,6 +1312,10 @@ for (const i of [0, 1]) {
   controllers.push(c);
   c.addEventListener("selectstart", () => {
     if (twoHandScaling) return; // mid two-handed zoom — don't grab
+    if (resetButtonPicked(c)) {
+      resetCards();
+      return;
+    }
     const card = pickCardForController(c); // card grab takes priority
     if (card && card.userData.state === "tray") {
       card.userData.state = "grabbed";
@@ -1535,6 +1664,7 @@ window.addEventListener("keydown", (e) => {
       .find((c) => c.userData.state === "tray");
     if (card) throwCard(card);
   }
+  if (k === "r") resetCards();
   if (k === "c")
     showNotice(
       "Capture needs a camera-access XR device — upload instead.",
@@ -1577,6 +1707,7 @@ renderer.setAnimationLoop(() => {
     applyThumbstickScale();
     applyHandPinchScale();
     pollCaptureButton();
+    pollResetButton();
     updateHover(0);
     updateHover(1);
     updateGrabHover();
@@ -1593,6 +1724,7 @@ renderer.setAnimationLoop(() => {
     else clearParkedHover();
   }
   updateCards(now);
+  updateResetButton();
   renderer.render(scene, camera);
 });
 
