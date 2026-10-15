@@ -793,6 +793,86 @@ function releaseCard(card, c) {
   else placeOnTray(card);
 }
 
+// ── Sound effects (synthesised with Web Audio — no asset files) ─────────────────
+// A whoosh on every throw, and a rising "suck" + plop while a card glides into
+// its predicted spot on the timeline. Browsers only allow audio after a user
+// gesture, so the context is created/resumed on the first pointer or key press
+// (the "Enter VR/AR" click counts).
+let _audio = null;
+let _noise = null;
+function _ac() {
+  if (!_audio) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    _audio = new AC();
+    _noise = _audio.createBuffer(1, _audio.sampleRate, _audio.sampleRate);
+    const d = _noise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  if (_audio.state === "suspended") _audio.resume();
+  return _audio;
+}
+for (const ev of ["pointerdown", "keydown"]) {
+  window.addEventListener(ev, () => _ac(), { once: true });
+}
+
+// Band-passed white noise through a gain envelope; returns the nodes to shape.
+function _noiseVoice(ac, t0, dur) {
+  const src = ac.createBufferSource();
+  src.buffer = _noise;
+  src.loop = true;
+  const bp = ac.createBiquadFilter();
+  bp.type = "bandpass";
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  src.connect(bp).connect(g).connect(ac.destination);
+  src.start(t0);
+  src.stop(t0 + dur + 0.05);
+  return { bp, g };
+}
+
+// intensity 0..1 scales loudness (harder throw → louder whoosh).
+function playThrowSound(intensity = 0.7) {
+  const ac = _ac();
+  if (!ac) return;
+  const t = ac.currentTime,
+    dur = 0.4;
+  const { bp, g } = _noiseVoice(ac, t, dur);
+  bp.Q.value = 1.2;
+  bp.frequency.setValueAtTime(400, t);
+  bp.frequency.exponentialRampToValueAtTime(2600, t + 0.12);
+  bp.frequency.exponentialRampToValueAtTime(600, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.6 * intensity, t + 0.06);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+
+// dur matches the glide so the plop lands with the card.
+function playSuckSound(dur) {
+  const ac = _ac();
+  if (!ac) return;
+  const t = ac.currentTime;
+  const { bp, g } = _noiseVoice(ac, t, dur);
+  bp.Q.setValueAtTime(2, t);
+  bp.Q.linearRampToValueAtTime(8, t + dur); // narrows into a whistle-ish slurp
+  bp.frequency.setValueAtTime(300, t);
+  bp.frequency.exponentialRampToValueAtTime(2800, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.35, t + dur * 0.85);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  // Plop on arrival: a short downward sine blip.
+  const osc = ac.createOscillator();
+  const og = ac.createGain();
+  const tp = t + dur * 0.95;
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(700, tp);
+  osc.frequency.exponentialRampToValueAtTime(140, tp + 0.09);
+  og.gain.setValueAtTime(0.0001, tp);
+  og.gain.exponentialRampToValueAtTime(0.5, tp + 0.01);
+  og.gain.exponentialRampToValueAtTime(0.0001, tp + 0.12);
+  osc.connect(og).connect(ac.destination);
+  osc.start(tp);
+  osc.stop(tp + 0.15);
+}
+
 // Retry transient transport failures (the demo tunnel drops requests). Network
 // errors and 5xx are retried with backoff; 4xx is returned as-is (real error).
 async function _fetchRetry(url, opts, tries = 3) {
@@ -838,6 +918,7 @@ function throwCard(card, vel, axis, rate) {
     dead: false,
   };
   card.userData.flight = f;
+  playThrowSound(THREE.MathUtils.clamp(f.vel.length() / 3, 0.35, 1));
 
   (async () => {
     try {
@@ -1120,6 +1201,7 @@ function updateCards(now) {
           const dist = f.gFrom.distanceTo(_fTarget);
           f.gDur = THREE.MathUtils.clamp(dist / 1.6, FLIGHT_MIN, FLIGHT_MAX);
           f.gArc = Math.min(0.25, dist * 0.18);
+          playSuckSound(f.gDur);
         }
         gp = Math.min(1, (f.t - f.gStart) / Math.max(f.gDur, 1e-3));
         const e = gp < 0.5 ? 2 * gp * gp : 1 - Math.pow(-2 * gp + 2, 2) / 2;
