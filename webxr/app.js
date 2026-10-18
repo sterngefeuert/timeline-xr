@@ -816,61 +816,62 @@ for (const ev of ["pointerdown", "keydown"]) {
   window.addEventListener(ev, () => _ac(), { once: true });
 }
 
-// Band-passed white noise through a gain envelope; returns the nodes to shape.
-function _noiseVoice(ac, t0, dur) {
+// Filtered white noise through a gain envelope; returns the nodes to shape.
+function _noiseVoice(ac, t0, dur, type = "lowpass") {
   const src = ac.createBufferSource();
   src.buffer = _noise;
   src.loop = true;
-  const bp = ac.createBiquadFilter();
-  bp.type = "bandpass";
+  const f = ac.createBiquadFilter();
+  f.type = type;
   const g = ac.createGain();
   g.gain.setValueAtTime(0.0001, t0);
-  src.connect(bp).connect(g).connect(ac.destination);
+  src.connect(f).connect(g).connect(ac.destination);
   src.start(t0);
   src.stop(t0 + dur + 0.05);
-  return { bp, g };
+  return { f, g };
 }
 
-// intensity 0..1 scales loudness (harder throw → louder whoosh).
+// intensity 0..1 scales loudness (harder throw → louder whoosh). A soft, airy
+// lowpassed rush — kept low and short so it reads as motion, not a cartoon zip.
 function playThrowSound(intensity = 0.7) {
   const ac = _ac();
   if (!ac) return;
   const t = ac.currentTime,
-    dur = 0.4;
-  const { bp, g } = _noiseVoice(ac, t, dur);
-  bp.Q.value = 1.2;
-  bp.frequency.setValueAtTime(400, t);
-  bp.frequency.exponentialRampToValueAtTime(2600, t + 0.12);
-  bp.frequency.exponentialRampToValueAtTime(600, t + dur);
-  g.gain.exponentialRampToValueAtTime(0.6 * intensity, t + 0.06);
+    dur = 0.45;
+  const { f, g } = _noiseVoice(ac, t, dur);
+  f.Q.value = 0.5;
+  f.frequency.setValueAtTime(500, t);
+  f.frequency.exponentialRampToValueAtTime(1400, t + 0.1);
+  f.frequency.exponentialRampToValueAtTime(350, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.22 * intensity, t + 0.07);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
 }
 
-// dur matches the glide so the plop lands with the card.
+// dur matches the glide so the landing thud coincides with the card arriving.
+// A gentle breath-like inhale (broad, low-Q noise swelling in) plus a muted low
+// thump on arrival — no pitched whistle or pop.
 function playSuckSound(dur) {
   const ac = _ac();
   if (!ac) return;
   const t = ac.currentTime;
-  const { bp, g } = _noiseVoice(ac, t, dur);
-  bp.Q.setValueAtTime(2, t);
-  bp.Q.linearRampToValueAtTime(8, t + dur); // narrows into a whistle-ish slurp
-  bp.frequency.setValueAtTime(300, t);
-  bp.frequency.exponentialRampToValueAtTime(2800, t + dur);
-  g.gain.exponentialRampToValueAtTime(0.35, t + dur * 0.85);
+  const { f, g } = _noiseVoice(ac, t, dur);
+  f.Q.value = 0.4;
+  f.frequency.setValueAtTime(250, t);
+  f.frequency.exponentialRampToValueAtTime(1100, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.14, t + dur * 0.8);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  // Plop on arrival: a short downward sine blip.
   const osc = ac.createOscillator();
   const og = ac.createGain();
-  const tp = t + dur * 0.95;
+  const tp = t + dur * 0.97;
   osc.type = "sine";
-  osc.frequency.setValueAtTime(700, tp);
-  osc.frequency.exponentialRampToValueAtTime(140, tp + 0.09);
+  osc.frequency.setValueAtTime(110, tp);
+  osc.frequency.exponentialRampToValueAtTime(55, tp + 0.18);
   og.gain.setValueAtTime(0.0001, tp);
-  og.gain.exponentialRampToValueAtTime(0.5, tp + 0.01);
-  og.gain.exponentialRampToValueAtTime(0.0001, tp + 0.12);
+  og.gain.exponentialRampToValueAtTime(0.25, tp + 0.015);
+  og.gain.exponentialRampToValueAtTime(0.0001, tp + 0.22);
   osc.connect(og).connect(ac.destination);
   osc.start(tp);
-  osc.stop(tp + 0.15);
+  osc.stop(tp + 0.25);
 }
 
 // Retry transient transport failures (the demo tunnel drops requests). Network
