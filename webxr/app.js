@@ -831,19 +831,19 @@ function _noiseVoice(ac, t0, dur, type = "lowpass") {
   return { f, g };
 }
 
-// intensity 0..1 scales loudness (harder throw → louder whoosh). A soft, airy
-// lowpassed rush — kept low and short so it reads as motion, not a cartoon zip.
+// intensity 0..1 scales loudness (harder throw → louder). A short, soft puff of
+// air: fixed low cutoff with only a slight downward drift — no rising/falling
+// sweep, which is what makes a whoosh sound like a cartoon zip.
 function playThrowSound(intensity = 0.7) {
   const ac = _ac();
   if (!ac) return;
   const t = ac.currentTime,
-    dur = 0.45;
+    dur = 0.3;
   const { f, g } = _noiseVoice(ac, t, dur);
-  f.Q.value = 0.5;
-  f.frequency.setValueAtTime(500, t);
-  f.frequency.exponentialRampToValueAtTime(1400, t + 0.1);
-  f.frequency.exponentialRampToValueAtTime(350, t + dur);
-  g.gain.exponentialRampToValueAtTime(0.22 * intensity, t + 0.07);
+  f.Q.value = 0.3;
+  f.frequency.setValueAtTime(900, t);
+  f.frequency.exponentialRampToValueAtTime(500, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.16 * intensity, t + 0.03);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
 }
 
